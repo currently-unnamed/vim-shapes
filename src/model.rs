@@ -1178,6 +1178,14 @@ impl Element {
             .map_or(0, |(i, _)| i)
     }
 
+    /// The handle within `tol` cells of a point, if any — a mouse hit-test, where
+    /// `nearest_handle` always answers with *something* even a screen width away.
+    pub fn handle_at(&self, p: (f64, f64), tol: f64) -> Option<usize> {
+        let i = self.nearest_handle(p);
+        let h = self.handles()[i];
+        ((h.0 - p.0).powi(2) + ((h.1 - p.1) * 2.0).powi(2) <= tol.powi(2)).then_some(i)
+    }
+
     /// The name a status line or picker calls it by: its label, or its kind when unlabelled.
     pub fn display(&self) -> String {
         match self.label.trim().is_empty() {
@@ -1566,6 +1574,29 @@ impl Document {
         v
     }
 
+    /// The frontmost visible element under a point — what a mouse click lands on. A grouping
+    /// is always drawn behind what it holds (`raise_element(.., Raise::Back)` on creation), so
+    /// scanning drawing order back-to-front needs no separate case for "prefer the member over
+    /// the box it sits in": the member is simply drawn later, and so is found first here.
+    pub fn element_at(&self, p: (f64, f64)) -> Option<ElementId> {
+        self.elements_in_order().into_iter().rev().find(|e| self.element_visible(e.id) && e.contains(p)).map(|e| e.id)
+    }
+
+    /// The relation whose route passes within `tol` cells of a point, if any — the nearest
+    /// one, where more than one line crosses so close together.
+    pub fn relation_at(&self, p: (f64, f64), tol: f64) -> Option<RelationId> {
+        self.relations
+            .iter()
+            .filter(|r| self.relation_visible(r.id))
+            .filter_map(|r| {
+                let route = self.route(r)?;
+                let d = route.windows(2).map(|seg| dist_to_segment(p, seg[0], seg[1])).fold(f64::INFINITY, f64::min);
+                (d <= tol).then_some((r.id, d))
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(id, _)| id)
+    }
+
     pub fn relations_in_order(&self) -> Vec<&Relation> {
         let mut v: Vec<&Relation> = self.relations.iter().collect();
         v.sort_by_key(|r| self.layer_index(r.layer));
@@ -1661,6 +1692,19 @@ impl Document {
         }
         Some(b)
     }
+}
+
+/// A point's distance to a line segment — `relation_at`'s hit test, since a route is a chain
+/// of these end to end.
+fn dist_to_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (abx, aby) = (b.0 - a.0, b.1 - a.1);
+    let len2 = abx * abx + aby * aby;
+    if len2 == 0.0 {
+        return ((p.0 - a.0).powi(2) + (p.1 - a.1).powi(2)).sqrt();
+    }
+    let t = (((p.0 - a.0) * abx + (p.1 - a.1) * aby) / len2).clamp(0.0, 1.0);
+    let (cx, cy) = (a.0 + t * abx, a.1 + t * aby);
+    ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt()
 }
 
 #[cfg(test)]
@@ -1836,6 +1880,40 @@ mod tests {
         doc.element_mut(outside).unwrap().x = 4.0;
         assert_eq!(doc.members(g).len(), 2, "moving in is joining");
         assert!(doc.members(inside).is_empty(), "only a composite has members");
+    }
+
+    #[test]
+    fn a_click_inside_a_grouping_lands_on_the_member_drawn_in_front_of_it() {
+        let mut doc = Document::default();
+        let g = doc.add(Grouping, "crm", 0.0, 0.0);
+        let inside = doc.add(ApplicationComponent, "", 2.0, 2.0);
+        assert_eq!(doc.element_at((3.0, 3.0)), Some(inside), "the member, not the box behind it");
+        assert_eq!(doc.element_at((0.5, 0.5)), Some(g), "ground the grouping has and the member does not");
+        assert_eq!(doc.element_at((-5.0, -5.0)), None, "off every box");
+    }
+
+    #[test]
+    fn a_handle_hit_test_has_a_radius() {
+        let mut doc = Document::default();
+        let a = doc.add(Box, "", 0.0, 0.0);
+        let e = doc.element(a).unwrap();
+        let top_left = e.handles()[0];
+        assert_eq!(e.handle_at(top_left, 0.5), Some(0));
+        assert_eq!(e.handle_at((top_left.0 + 0.1, top_left.1), 0.5), Some(0), "close enough");
+        assert_eq!(e.handle_at(e.center(), 0.5), None, "the middle is nobody's handle");
+    }
+
+    #[test]
+    fn a_relation_hit_test_follows_its_route() {
+        let mut doc = Document::default();
+        let a = doc.add(Box, "", 0.0, 0.0);
+        let b = doc.add(Box, "", 40.0, 0.0);
+        let r = doc.connect(RelationKind::Link, a, b).unwrap();
+        let rel = doc.relation(r).unwrap().clone();
+        let (p1, p2) = doc.end_points(&rel).unwrap();
+        let mid = ((p1.0 + p2.0) / 2.0, (p1.1 + p2.1) / 2.0);
+        assert_eq!(doc.relation_at(mid, 0.5), Some(r));
+        assert_eq!(doc.relation_at((mid.0, mid.1 + 20.0), 0.5), None, "far off the line");
     }
 
     #[test]

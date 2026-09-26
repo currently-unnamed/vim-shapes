@@ -44,6 +44,11 @@ pub struct Scene<'a> {
     /// An element being reshaped: which of its eight handles the cursor is on, and whether
     /// that handle is in hand.
     pub reshape: Option<(ElementId, usize, bool)>,
+    /// The element under the mouse, outside any reshape — a fallback so its handles paint
+    /// too, and can be found before anything is clicked.
+    pub hover: Option<ElementId>,
+    /// A marquee drag in progress: its anchor, and where the mouse is now.
+    pub marquee: Option<((f64, f64), (f64, f64))>,
     /// Whether shape labels are written. The PNG renderer leaves them out and sets them in
     /// each shape's own font instead; the screen always writes them.
     pub labels: bool,
@@ -202,6 +207,14 @@ impl Scene<'_> {
             let hand = crate::ontology::Notation { line: LineStyle::Dashed, tail: End::None, head: End::Arrow, width: 1, color: None, route: crate::ontology::Route::Straight, end_size: crate::ontology::EndSize::Normal, opacity: 100 };
             paint_relation(ctx, &[p1, p2], &hand, theme::t().yellow, flip);
         }
+        // A marquee in progress: a dashed box from its anchor to wherever the mouse is now.
+        if let Some(((ax, ay), (bx, by))) = self.marquee {
+            let (x0, x1) = (ax.min(bx), ax.max(bx));
+            let (y0, y1) = (ay.min(by), ay.max(by));
+            let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)];
+            let dashed = crate::ontology::Notation { line: LineStyle::Dashed, tail: End::None, head: End::None, width: 1, color: None, route: crate::ontology::Route::Straight, end_size: crate::ontology::EndSize::Normal, opacity: 100 };
+            paint_relation(ctx, &corners, &dashed, theme::t().bright, flip);
+        }
         // The focused relation's three nodes, in braille: a small hollow diamond at each, and
         // at the one the cursor is on a filled diamond inside a ring — a mark you can stand on
         // and see, not a character in a block.
@@ -218,12 +231,15 @@ impl Scene<'_> {
         }
         // Inside a shape, its eight handles the same way: a diamond at each, a ring where a
         // relation is attached, and the one under the cursor filled — green once in hand.
-        if let Some((id, on, held)) = self.reshape
+        // Outside a reshape, the hovered element's handles paint too, unfocused — how a mouse
+        // finds them before it has clicked one.
+        let handles_on = self.reshape.map(|(id, on, held)| (id, Some(on), held)).or(self.hover.map(|id| (id, None, false)));
+        if let Some((id, on, held)) = handles_on
             && let Some(e) = self.doc.element(id)
         {
             for (i, h) in e.handles().into_iter().enumerate() {
                 let patched = !self.doc.at_port(id, i).is_empty();
-                let mark = match (i == on, held, patched) {
+                let mark = match (Some(i) == on, held, patched) {
                     (true, true, _) => Mark::Focused(theme::t().green),
                     (true, false, _) => Mark::Focused(theme::t().yellow),
                     (false, _, true) => Mark::Patched(theme::t().aqua),
@@ -577,7 +593,7 @@ mod page_tests {
         let mut term = Terminal::new(TestBackend::new(60, 16)).unwrap();
         term.draw(|f| {
             f.render_widget(
-                Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
+                Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, marquee: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
                 f.area(),
             )
         })
@@ -633,7 +649,7 @@ mod page_tests {
             let mut term = Terminal::new(TestBackend::new(60, 16)).unwrap();
             term.draw(|f| {
                 f.render_widget(
-                    Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
+                    Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, marquee: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
                     f.area(),
                 )
             })
@@ -719,7 +735,7 @@ mod tests {
                 letters: None,
                 insert: None,
                 refused: &[],
-                reshape: None,
+                reshape: None, hover: None, marquee: None,
                 labels: true,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -751,7 +767,7 @@ mod tests {
             letters: None,
             insert: None,
             refused: &[],
-            reshape: None,
+            reshape: None, hover: None, marquee: None,
             labels: true,
             grid: true,
             ink: crate::ui::wire::Ink::Braille,
@@ -796,7 +812,7 @@ mod tests {
                 letters: None,
                 insert: None,
                 refused: &[],
-                reshape: None,
+                reshape: None, hover: None, marquee: None,
                 labels: true,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -856,7 +872,7 @@ mod tests {
             letters: None,
             insert,
             refused: &[],
-            reshape: None,
+            reshape: None, hover: None, marquee: None,
             labels: true,
             grid: true,
             ink: crate::ui::wire::Ink::Braille,

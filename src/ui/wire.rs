@@ -597,6 +597,12 @@ pub fn paint(scene: &Scene, area: Rect, buf: &mut Buffer) {
         g.segment(p1, p2, Weight::Dashed, theme::t().yellow);
         g.fixed(p2.0, p2.1, end_glyph(End::Arrow, (p2.0 - p1.0, p2.1 - p1.1)).unwrap_or('▶'), theme::t().yellow);
     }
+    // A marquee in progress: a dashed box from its anchor to wherever the mouse is now.
+    if let Some(((ax, ay), (bx, by))) = scene.marquee {
+        let (x0, x1) = (ax.min(bx) as i64, ax.max(bx) as i64);
+        let (y0, y1) = (ay.min(by) as i64, ay.max(by) as i64);
+        g.rect(x0, y0, x1, y1, Weight::Dashed, false, theme::t().bright);
+    }
 
     for e in doc.elements_in_order() {
         if !doc.element_visible(e.id) || !e.outline {
@@ -627,12 +633,15 @@ pub fn paint(scene: &Scene, area: Rect, buf: &mut Buffer) {
             g.fixed(p.0, p.1, if on { '◆' } else { '◇' }, if on { theme::t().yellow } else { theme::t().bright });
         }
     }
-    if let Some((id, on, held)) = scene.reshape
+    // Outside a reshape, the hovered element's handles paint too, unfocused — how a mouse
+    // finds them before it has clicked one.
+    let handles_on = scene.reshape.map(|(id, on, held)| (id, Some(on), held)).or(scene.hover.map(|id| (id, None, false)));
+    if let Some((id, on, held)) = handles_on
         && let Some(e) = doc.element(id)
     {
         for (i, h) in e.handles().into_iter().enumerate() {
             let patched = !doc.at_port(id, i).is_empty();
-            let (ch, c) = match (i == on, held, patched) {
+            let (ch, c) = match (Some(i) == on, held, patched) {
                 (true, true, _) => ('◆', theme::t().green),
                 (true, false, _) => ('◆', theme::t().yellow),
                 (false, _, true) => ('●', theme::t().aqua),

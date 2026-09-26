@@ -63,6 +63,8 @@ pub fn cells(doc: &Document, grid: bool, labels: bool, border: f64) -> Buffer {
         insert: None,
         refused: &refused,
         reshape: None,
+        hover: None,
+        marquee: None,
         labels,
         grid,
         ink: crate::ui::wire::ink(),

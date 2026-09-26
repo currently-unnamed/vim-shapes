@@ -32,7 +32,7 @@ pub mod wire;
 
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -133,6 +133,27 @@ const PAN_Y: f64 = 4.0;
 const MIN_W: f64 = 4.0;
 const MIN_H: f64 = 2.0;
 
+/// What a mouse `Down` landed on, kept until the matching `Up` (or the first `Drag`) decides
+/// what the gesture meant — a click that never drags must look, to the document, exactly like
+/// nothing happened at all.
+#[derive(Clone, Debug, PartialEq)]
+enum MouseGesture {
+    /// An element's body: the ids a drag of it would move (locked ones already filtered out).
+    Body(Vec<ElementId>),
+    /// A handle of the cursor's element. `self.reshape`, set at the same moment, already says
+    /// whether it is a resize or a reroute — the mouse just triggers the same grab `Enter`
+    /// would, at `Down` instead of a keystroke.
+    Handle,
+    /// Empty ground, at this world point — a drag turns it into a marquee.
+    Ground((f64, f64)),
+}
+
+/// A handle's hit radius, in cells — generous, since a handle is a single point and a mouse
+/// arrives at cell resolution.
+const HANDLE_HIT: f64 = 0.75;
+/// How close a click has to land on a relation's route to focus it rather than miss it.
+const RELATION_HIT: f64 = 0.6;
+
 /// A tab that is not the current one: its name, and everything about it that the app keeps
 /// per diagram, parked until you switch back. The current tab's state lives in `App`'s own
 /// fields, and its slot holds only the name — so every method that says `self.doc` keeps
@@ -216,6 +237,28 @@ pub struct App {
     camera: (f64, f64),
     /// The body's size at the last draw, for the camera to keep the cursor inside.
     view_size: (u16, u16),
+    /// The diagram body's screen rectangle at the last draw, in the terminal's own
+    /// coordinates — the same space a `MouseEvent`'s `column`/`row` arrive in, so a click can
+    /// be turned into a world point the same way the camera already turns cells into world.
+    body: Rect,
+    /// The element under the mouse, updated on every `Moved` — purely so its handles can be
+    /// painted before anything is clicked. `self.reshape`'s handles are the ones in hand;
+    /// these are the ones a mouse could reach for.
+    hover: Option<ElementId>,
+    /// What a mouse `Down` is in the middle of, until its `Up`.
+    mouse_gesture: Option<MouseGesture>,
+    /// Whether at least one `Drag` has arrived since the last `Down` — the one bit of state
+    /// that tells a click from a drag, since a terminal reports them as distinct event kinds.
+    mouse_dragging: bool,
+    /// The last mouse position translated to world coordinates, so a `Drag` event (an
+    /// absolute position) can be turned into the delta `move_elements`/`drag_handle` want.
+    mouse_pos: Option<(f64, f64)>,
+    /// A marquee in progress: its anchor, and where the mouse is now.
+    marquee: Option<((f64, f64), (f64, f64))>,
+    /// The right button's candidate element for a connection, from `Down` until `Up`.
+    connect_from: Option<ElementId>,
+    /// What the debugging panel's "last mouse" row shows.
+    last_mouse: String,
     search: Option<String>,
     back: Vec<ElementId>,
     forward: Vec<ElementId>,
@@ -292,6 +335,14 @@ impl App {
             status: None,
             camera: (0.0, 0.0),
             view_size: (80, 22),
+            body: Rect::new(0, 0, 80, 22),
+            hover: None,
+            mouse_gesture: None,
+            mouse_dragging: false,
+            mouse_pos: None,
+            marquee: None,
+            connect_from: None,
+            last_mouse: String::new(),
             search: None,
             back: Vec::new(),
             forward: Vec::new(),
@@ -1242,7 +1293,14 @@ impl App {
             return;
         }
         self.checkpoint();
-        for id in ids {
+        self.move_elements(&ids, dx, dy);
+    }
+
+    /// Move each element in `ids` by `(dx, dy)` — the one place "moving these shapes" happens.
+    /// `nudge` checkpoints before every call, one keypress at a time; a mouse drag checkpoints
+    /// once and calls this once per `Drag` event, so the whole drag is one undo step.
+    fn move_elements(&mut self, ids: &[ElementId], dx: f64, dy: f64) {
+        for &id in ids {
             if let Some(e) = self.doc.element_mut(id) {
                 e.x += dx;
                 e.y += dy;
@@ -2002,6 +2060,272 @@ impl App {
             _ => {}
         }
         self.follow_camera();
+    }
+
+    // ─── the mouse ──────────────────────────────────────────────────────────
+
+    /// A screen point — a terminal's own coordinates, what a `MouseEvent`'s `column`/`row`
+    /// are — as a point in the diagram's world, or `None` outside the diagram body: the
+    /// header, the footer, a docked panel.
+    fn screen_to_world(&self, col: u16, row: u16) -> Option<(f64, f64)> {
+        let b = self.body;
+        if col < b.x || col >= b.x + b.width || row < b.y || row >= b.y + b.height {
+            return None;
+        }
+        Some((self.camera.0 + (col - b.x) as f64, self.camera.1 + (row - b.y) as f64))
+    }
+
+    /// The handle of the frontmost element under a point, if the point is close enough to
+    /// one. A click near a box's corner or edge is close enough to it that `element_at` would
+    /// answer with the same element anyway, so there is no separate "which element's handles"
+    /// question to ask first.
+    fn hit_handle(&self, p: (f64, f64)) -> Option<(ElementId, usize)> {
+        let id = self.doc.element_at(p)?;
+        let e = self.doc.element(id)?;
+        e.handle_at(p, HANDLE_HIT).map(|h| (id, h))
+    }
+
+    /// Land the cursor on a relation clicked directly: whichever end sits nearer the click,
+    /// with the focus already on this relation — the same state `Tab` walks to.
+    fn land_on_relation(&mut self, rid: RelationId, p: (f64, f64)) {
+        let Some(r) = self.doc.relation(rid) else { return };
+        let (from, to) = (r.from, r.to);
+        let (Some(a), Some(b)) = (self.doc.element(from), self.doc.element(to)) else { return };
+        let d = |c: (f64, f64)| (c.0 - p.0).powi(2) + (c.1 - p.1).powi(2);
+        let near = if d(a.center()) <= d(b.center()) { from } else { to };
+        self.set_cursor(near);
+        let rels = self.doc.incident(near);
+        self.focus = rels.iter().position(|&x| x == rid).map_or(0, |i| i + 1);
+    }
+
+    /// Whether anything owns the keyboard in a way that should own the mouse too — every
+    /// overlay `on_key` already checks first, in the same order (`manual`, `palette`,
+    /// `relpick`, and so on). Mouse support in this pass is the diagram body only; clicking an
+    /// overlay is a later, separate addition, so while one is up the mouse simply does
+    /// nothing rather than acting on the diagram underneath it.
+    fn mouse_active(&self) -> bool {
+        !self.loading
+            && !self.present
+            && self.start.is_none()
+            && self.manual.is_none()
+            && self.help.is_none()
+            && self.palette.is_none()
+            && self.relpick.is_none()
+            && self.tabpick.is_none()
+            && self.layers.is_none()
+            && self.tree.is_none()
+            && self.props.is_none()
+            && self.colour.is_none()
+            && !self.sheet.as_ref().is_some_and(|s| s.focused)
+            && self.export.is_none()
+            && self.cmdline.is_none()
+            && self.confirm.is_none()
+            && self.insert.is_none()
+            && !self.placing
+            && !self.viewing
+    }
+
+    pub fn on_mouse(&mut self, m: MouseEvent) {
+        self.last_mouse = debug::describe_mouse(&m);
+        if !self.mouse_active() {
+            return;
+        }
+        let Some(p) = self.screen_to_world(m.column, m.row) else {
+            // Outside the diagram body — nothing to hit, but a stray `Up` off the edge must
+            // still let go of whatever was in hand, or a drag that leaves the body gets stuck
+            // open forever.
+            if let MouseEventKind::Up(btn) = m.kind {
+                let last = self.mouse_pos.unwrap_or((self.camera.0, self.camera.1));
+                match btn {
+                    MouseButton::Left => self.mouse_left_up(last),
+                    MouseButton::Right => self.mouse_right_up(last),
+                    MouseButton::Middle => {}
+                }
+            }
+            return;
+        };
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_left_down(p),
+            MouseEventKind::Drag(MouseButton::Left) => self.mouse_left_drag(p),
+            MouseEventKind::Up(MouseButton::Left) => self.mouse_left_up(p),
+            MouseEventKind::Down(MouseButton::Right) => self.mouse_right_down(p),
+            MouseEventKind::Drag(MouseButton::Right) => self.mouse_right_drag(p),
+            MouseEventKind::Up(MouseButton::Right) => self.mouse_right_up(p),
+            MouseEventKind::Moved => self.hover = self.doc.element_at(p),
+            MouseEventKind::ScrollUp => self.pan(0.0, -PAN_Y),
+            MouseEventKind::ScrollDown => self.pan(0.0, PAN_Y),
+            MouseEventKind::ScrollLeft => self.pan(-PAN_X, 0.0),
+            MouseEventKind::ScrollRight => self.pan(PAN_X, 0.0),
+            _ => {}
+        }
+        self.mouse_pos = Some(p);
+        self.follow_camera();
+    }
+
+    fn mouse_left_down(&mut self, p: (f64, f64)) {
+        self.status = None;
+        self.mouse_dragging = false;
+        if let Some((id, handle)) = self.hit_handle(p) {
+            self.set_cursor(id);
+            match self.doc.at_port(id, handle).first().copied() {
+                Some(rid) => {
+                    let is_from = self.doc.relation(rid).is_some_and(|r| r.from == id);
+                    self.reshape = Some(Reshape { handle, held: false, moving: Some((rid, is_from, handle)) });
+                }
+                None => {
+                    // One checkpoint per grab, exactly as `Enter` takes one — the whole drag,
+                    // however it ends, is one undo step.
+                    self.checkpoint();
+                    self.reshape = Some(Reshape { handle, held: true, moving: None });
+                }
+            }
+            self.mouse_gesture = Some(MouseGesture::Handle);
+            return;
+        }
+        if let Some(id) = self.doc.element_at(p) {
+            // Clicking outside the current pick starts a fresh one — dragging a member of it
+            // moves the whole group; dragging something else moves just that.
+            if self.visual && !self.selection.contains(&id) {
+                self.visual = false;
+                self.selection.clear();
+            }
+            self.set_cursor(id);
+            let ids: Vec<ElementId> = self.movable().into_iter().filter(|i| !self.doc.element_locked(*i)).collect();
+            self.mouse_gesture = Some(MouseGesture::Body(ids));
+            return;
+        }
+        if let Some(rid) = self.doc.relation_at(p, RELATION_HIT) {
+            self.land_on_relation(rid, p);
+        } else {
+            self.cursor = None;
+            self.visual = false;
+            self.selection.clear();
+        }
+        self.mouse_gesture = Some(MouseGesture::Ground(p));
+    }
+
+    fn mouse_left_drag(&mut self, p: (f64, f64)) {
+        let first = !self.mouse_dragging;
+        self.mouse_dragging = true;
+        let Some(prev) = self.mouse_pos else { return };
+        let (dx, dy) = (p.0 - prev.0, p.1 - prev.1);
+        match self.mouse_gesture.clone() {
+            Some(MouseGesture::Body(ids)) if !ids.is_empty() => {
+                if first {
+                    self.checkpoint();
+                }
+                self.move_elements(&ids, dx, dy);
+            }
+            Some(MouseGesture::Handle) => {
+                let Some(rs) = self.reshape else { return };
+                if rs.moving.is_some() {
+                    // Reroute only ever retargets a relation's end to another port on the
+                    // same element — keyboard's own `next_handle` never crosses elements
+                    // either — so the live preview is just "which handle is nearest now".
+                    if let Some(id) = self.cursor
+                        && let Some(e) = self.doc.element(id)
+                    {
+                        let nearest = e.nearest_handle(p);
+                        if nearest != rs.handle {
+                            self.reshape = Some(Reshape { handle: nearest, ..rs });
+                        }
+                    }
+                } else if rs.held {
+                    self.drag_handle(rs.handle, dx, dy);
+                }
+            }
+            Some(MouseGesture::Ground(anchor)) => {
+                self.marquee = Some((anchor, p));
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_left_up(&mut self, p: (f64, f64)) {
+        if self.mouse_dragging {
+            match self.mouse_gesture.take() {
+                Some(MouseGesture::Handle) => {
+                    // A mouse handle-drag is a one-shot gesture — it ends when the button
+                    // comes up, unlike keyboard's sticky Reshape mode, which needs a second
+                    // `Enter` or `Esc` to leave.
+                    if let Some(rs) = self.reshape.take()
+                        && let Some((rid, is_from, _back)) = rs.moving
+                        && let Some(id) = self.cursor
+                        && self.doc.at_port(id, rs.handle).is_empty()
+                    {
+                        self.checkpoint();
+                        if let Some(r) = self.doc.relation_mut(rid) {
+                            if is_from { r.from_port = Some(rs.handle as u8) } else { r.to_port = Some(rs.handle as u8) }
+                        }
+                        self.say("moved", Tone::Note);
+                    }
+                    // Otherwise: a resize, already applied live during the drag, or a reroute
+                    // dropped on a taken handle — either way, letting go is all that is left.
+                }
+                Some(MouseGesture::Ground(anchor)) if self.marquee.take().is_some() => {
+                    let (x0, x1) = (anchor.0.min(p.0), anchor.0.max(p.0));
+                    let (y0, y1) = (anchor.1.min(p.1), anchor.1.max(p.1));
+                    let hit: Vec<ElementId> = self
+                        .doc
+                        .elements_in_order()
+                        .into_iter()
+                        .filter(|e| self.doc.element_visible(e.id) && e.x < x1 && e.right() > x0 && e.y < y1 && e.bottom() > y0)
+                        .map(|e| e.id)
+                        .collect();
+                    self.visual = !hit.is_empty();
+                    self.selection = hit;
+                    if let Some(&first) = self.selection.first() {
+                        self.set_cursor(first);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.marquee = None;
+        self.mouse_gesture = None;
+        self.mouse_dragging = false;
+    }
+
+    fn mouse_right_down(&mut self, p: (f64, f64)) {
+        self.status = None;
+        self.mouse_dragging = false;
+        self.connect_from = self.doc.element_at(p);
+    }
+
+    fn mouse_right_drag(&mut self, p: (f64, f64)) {
+        self.mouse_dragging = true;
+        let Some(from) = self.connect_from else { return };
+        if self.holding.is_none() {
+            self.holding = Some(from);
+        }
+        self.cursor = Some(self.doc.element_at(p).unwrap_or(from));
+    }
+
+    /// A right-drag between two elements connects them, reusing the keyboard's own
+    /// hold/carry/drop verb (`drop_relation`) — the mouse just compresses it into one
+    /// gesture. Anything else — a plain right-click, or a drag that never found an element to
+    /// hold — cancels whatever is active instead: a held or moving reshape, then a held
+    /// relation, then a non-empty pick.
+    fn mouse_right_up(&mut self, _p: (f64, f64)) {
+        let attempted = self.mouse_dragging && self.holding.is_some();
+        if attempted {
+            let from = self.holding.expect("attempted implies holding");
+            let to = self.cursor.unwrap_or(from);
+            if to != from {
+                self.drop_relation();
+            } else {
+                self.holding = None;
+            }
+        } else if self.reshape.is_some_and(|r| r.held || r.moving.is_some()) {
+            self.reshape = None;
+        } else if self.holding.is_some() {
+            self.holding = None;
+        } else if self.visual || !self.selection.is_empty() {
+            self.visual = false;
+            self.selection.clear();
+        }
+        self.connect_from = None;
+        self.mouse_dragging = false;
     }
 
     /// What the cursor is on, as a thing that can be labelled or configured.
@@ -3170,6 +3494,8 @@ impl App {
                     insert: None,
                     refused: &refused,
                     reshape: None,
+                    hover: None,
+                    marquee: None,
                     labels: true,
                     grid: false,
                     ink: wire::ink(),
@@ -3193,6 +3519,7 @@ impl App {
         // the sheet only while it has the keyboard.
         let docked = (self.sheet.is_some() || self.layers.is_some() || self.props.is_some()) && full.width >= sheet::DOCK_MIN;
         let body = if docked { Rect { width: full.width - sheet::WIDTH, ..full } } else { full };
+        self.body = body;
         if self.view_size != (body.width, body.height) {
             self.view_size = (body.width, body.height);
             self.follow_camera();
@@ -3222,6 +3549,8 @@ impl App {
                 insert,
                 refused: &refused,
                 reshape: self.cursor.zip(self.reshape).map(|(id, r)| (id, r.handle, r.held)),
+                hover: self.hover,
+                marquee: self.marquee,
                 labels: true,
                 grid: self.doc.metadata.page.grid,
                 ink: wire::ink(),
@@ -3363,6 +3692,7 @@ impl App {
             ("ink", wire::ink().name().to_string()),
             ("panels", if panels.is_empty() { "—".into() } else { panels.join(" ") }),
             ("last key", self.last_resolved.clone()),
+            ("last mouse", self.last_mouse.clone()),
             ("prefix", format!("{:?}  count {:?}", self.pending_prefix, self.count)),
             ("", String::new()),
             ("cursor", on),
@@ -3531,6 +3861,23 @@ mod tests {
         let y = a.doc.add(ApplicationService, "Contacts API", 30.0, 2.0);
         a.set_cursor(x);
         (x, y)
+    }
+
+    /// A fresh `App`'s `body` starts at the screen origin, so a world point and a screen
+    /// point are the same numbers — these helpers drive `on_mouse` the way a finger would.
+    fn mouse(a: &mut App, kind: MouseEventKind, at: (f64, f64)) {
+        a.on_mouse(MouseEvent { kind, column: at.0 as u16, row: at.1 as u16, modifiers: KeyModifiers::NONE });
+    }
+
+    fn click(a: &mut App, btn: MouseButton, at: (f64, f64)) {
+        mouse(a, MouseEventKind::Down(btn), at);
+        mouse(a, MouseEventKind::Up(btn), at);
+    }
+
+    fn drag(a: &mut App, btn: MouseButton, from: (f64, f64), to: (f64, f64)) {
+        mouse(a, MouseEventKind::Down(btn), from);
+        mouse(a, MouseEventKind::Drag(btn), to);
+        mouse(a, MouseEventKind::Up(btn), to);
     }
 
     #[test]
@@ -5351,6 +5698,115 @@ mod tests {
         term.draw(|f| a.draw(f)).unwrap();
         let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
         assert!(out.contains("contents"));
+    }
+
+    // ─── the mouse ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_mouse_click_selects_and_changes_nothing_else() {
+        let mut a = app();
+        let (_x, y) = two(&mut a);
+        let before = a.doc.clone();
+        click(&mut a, MouseButton::Left, (32.0, 4.0));
+        assert_eq!(a.cursor, Some(y));
+        assert_eq!(a.doc, before, "a click alone changes nothing but the cursor");
+        assert!(a.undo.is_empty(), "no undo step for a plain click");
+    }
+
+    #[test]
+    fn a_click_on_ground_deselects() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        a.selection = vec![x];
+        a.visual = true;
+        click(&mut a, MouseButton::Left, (60.0, 15.0));
+        assert_eq!(a.cursor, None);
+        assert!(!a.visual && a.selection.is_empty());
+    }
+
+    #[test]
+    fn a_left_drag_on_a_body_moves_it_as_one_undo_step() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        drag(&mut a, MouseButton::Left, (10.0, 4.0), (14.0, 4.0));
+        let e = a.doc.element(x).unwrap();
+        assert_eq!((e.x, e.y), (6.0, 2.0), "moved by the drag's delta");
+        assert_eq!(a.undo.len(), 1, "one undo step for the whole drag, not one per event");
+    }
+
+    #[test]
+    fn a_left_drag_on_an_unpatched_handle_resizes_and_lets_go_on_release() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        drag(&mut a, MouseButton::Left, (18.0, 2.0), (22.0, 2.0));
+        let e = a.doc.element(x).unwrap();
+        assert_eq!(e.w, 20.0, "the right edge followed the drag");
+        assert!(a.reshape.is_none(), "a mouse handle-drag is one-shot: it ends on release");
+    }
+
+    #[test]
+    fn a_left_drag_on_a_patched_handle_reroutes_to_an_open_port_and_refuses_a_taken_one() {
+        let mut a = app();
+        let (x, y) = two(&mut a);
+        let r1 = a.doc.connect(RelationKind::Link, x, y).unwrap();
+        a.doc.relation_mut(r1).unwrap().from_port = Some(1); // the top handle
+        let r2 = a.doc.connect(RelationKind::Link, x, y).unwrap();
+        a.doc.relation_mut(r2).unwrap().from_port = Some(5); // the bottom handle — taken
+
+        drag(&mut a, MouseButton::Left, (10.0, 2.0), (10.0, 7.0));
+        assert_eq!(a.doc.relation(r1).unwrap().from_port, Some(1), "the bottom handle is r2's — refused");
+
+        drag(&mut a, MouseButton::Left, (10.0, 2.0), (2.0, 2.0));
+        assert_eq!(a.doc.relation(r1).unwrap().from_port, Some(0), "the top-left handle was open");
+    }
+
+    #[test]
+    fn a_marquee_selects_what_it_covers_and_nothing_outside_it() {
+        let mut a = app();
+        let (x, y) = two(&mut a);
+        drag(&mut a, MouseButton::Left, (0.0, 0.0), (20.0, 10.0));
+        assert_eq!(a.selection, vec![x], "y sits outside the box");
+        assert!(a.visual);
+        let _ = y;
+    }
+
+    #[test]
+    fn a_right_drag_between_two_elements_opens_the_relpick_as_a_keyboard_hold_and_drop_would() {
+        let mut a = app();
+        let (x, y) = two(&mut a);
+        drag(&mut a, MouseButton::Right, (10.0, 4.0), (38.0, 4.0));
+        assert!(a.relpick.is_some());
+        assert_eq!(a.holding, Some(x), "holding stays set until the picker resolves, same as the keyboard path");
+        let _ = y;
+    }
+
+    #[test]
+    fn a_plain_right_click_cancels_instead_of_connecting() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        a.selection = vec![x];
+        a.visual = true;
+        click(&mut a, MouseButton::Right, (10.0, 4.0));
+        assert!(a.relpick.is_none());
+        assert!(!a.visual && a.selection.is_empty(), "a right-click with no drag cancels the pick");
+    }
+
+    #[test]
+    fn scroll_pans_the_camera_by_the_keyboard_s_own_step() {
+        let mut a = app();
+        let before = a.camera;
+        mouse(&mut a, MouseEventKind::ScrollDown, (10.0, 10.0));
+        mouse(&mut a, MouseEventKind::ScrollRight, (10.0, 10.0));
+        assert_eq!(a.camera, (before.0 + PAN_X, before.1 + PAN_Y));
+    }
+
+    #[test]
+    fn hovering_shows_a_handle_without_clicking_and_leaves_no_trace_in_the_document() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        mouse(&mut a, MouseEventKind::Moved, (10.0, 4.0));
+        assert_eq!(a.hover, Some(x));
+        assert!(a.reshape.is_none(), "hovering is not a grab");
     }
 }
 

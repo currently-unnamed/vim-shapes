@@ -43,6 +43,10 @@ impl Section {
     /// A line under the heading, for the things a list of keys cannot say.
     pub fn note(self) -> &'static [&'static str] {
         match self {
+            Section::Move => &[
+                "the mouse works too: click lands the cursor, drag a body moves it, drag",
+                "a handle resizes or reroutes, scroll pans. :help mouse has the rest.",
+            ],
             Section::Relate => &[
                 "a relation is drawn in two moves: enter on an element takes hold of one,",
                 "hjkl carries it to another element, enter drops it. The picker then asks",
@@ -52,6 +56,9 @@ impl Section {
                 "a relation is a stop on the walk like any shape: hjkl land on it. On one,",
                 "tab walks its three nodes, enter changes its kind, x removes it, gd jumps",
                 "to the element at this end.",
+                "",
+                "the mouse draws one the same way in one move: right-drag from one",
+                "element to another opens the same picker. :help mouse.",
             ],
             Section::Diagram => &[
                 "adding, arranging and checking are ex-commands: :add opens the palette",

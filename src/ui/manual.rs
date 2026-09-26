@@ -301,6 +301,7 @@ fn build_pages() -> Vec<Page> {
              |intro|        what this is, in a page\n\
              |moving|       getting around the diagram\n\
              |relations|    drawing a line that means something\n\
+             |mouse|        click, drag, connect, scroll\n\
              |editing|      labels, moving, sizing, undo, picking\n\
              |layers|       the ontology: the kinds of shapes, by layer\n\
              |relation-kinds| the ways two elements join, by family\n\
@@ -458,6 +459,42 @@ fn build_pages() -> Vec<Page> {
              The kinds are described in |relation-kinds|. The one lesson worth knowing\n\
              first: the layer above never touches a component directly — it uses a\n\
              |business-service| or |app-service|, which the component |realization|s.\n"
+                .to_string(),
+        ),
+        page(
+            "mouse",
+            "*mouse*  click, drag, connect, scroll\n\
+             \n\
+             Every gesture below ends up in the same document methods hjkl and enter\n\
+             already use — a shape moved by mouse is not drawn a second way, only held\n\
+             by a different hand.\n\
+             \n\
+             >  click                 land the cursor on what is under it — a shape or\n\
+             >                        a relation\n\
+             >  click on ground       let go of the pick\n\
+             >  drag a body           move it (the whole pick, if it is part of one)\n\
+             >  hover a shape         its eight handles show — the same ones i opens\n\
+             >  drag an open handle   resize that corner or edge\n\
+             >  drag a patched handle move the relation's end to another handle on the\n\
+             >                        same shape\n\
+             >  right-drag,           the same picker enter/hjkl/enter opens, for a NEW\n\
+             >  shape to shape        relation between the two\n\
+             >  right-click           let go of whatever is in hand — a held handle, a\n\
+             >                        relation being carried, or a pick — the same as esc\n\
+             >  scroll                pan the view\n\
+             \n\
+             A drag that never moves anything is a click: nothing is written to the\n\
+             document until something actually moves, so landing the cursor by mouse\n\
+             costs exactly as little as landing it with hjkl.\n\
+             \n\
+             Dragging from empty ground draws a marquee; letting go picks every shape\n\
+             it touches, the same set V and a motion would. See |relations| for what\n\
+             the picker does once a line is dropped, and |editing| for undo — a mouse\n\
+             drag is one undo step, like any edit.\n\
+             \n\
+             :debug's \"last mouse\" row says what the last mouse event was, the way\n\
+             \"last key\" does for the keyboard — the first thing to check when a click\n\
+             seems to do nothing.\n"
                 .to_string(),
         ),
         page(

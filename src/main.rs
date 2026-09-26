@@ -15,7 +15,9 @@ mod ui;
 
 use std::io::{self, Stdout};
 
-use crossterm::event::{self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen, LeaveAlternateScreen};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -148,6 +150,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
         terminal.draw(|frame| app.draw(frame))?;
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+            Event::Mouse(m) => app.on_mouse(m),
             _ => {}
         }
         if app.should_quit {
@@ -159,7 +162,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     // A plain terminal sends shift+ctrl+h as the same byte as ctrl+h, and the app has a
     // move on one and a linked shape on the other. The kitty keyboard protocol tells them
     // apart; ask for it where the terminal has it, and the app knows either way.
@@ -176,7 +179,7 @@ fn restore_terminal() -> io::Result<()> {
         execute!(io::stdout(), PopKeyboardEnhancementFlags)?;
     }
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     Ok(())
 }
 

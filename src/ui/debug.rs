@@ -46,6 +46,27 @@ impl Widget for Panel<'_> {
     }
 }
 
+/// A mouse event, written for the "last mouse" row — the mouse's answer to `describe`.
+pub fn describe_mouse(m: &crossterm::event::MouseEvent) -> String {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let button = |b: MouseButton| match b {
+        MouseButton::Left => "left",
+        MouseButton::Right => "right",
+        MouseButton::Middle => "middle",
+    };
+    let kind = match m.kind {
+        MouseEventKind::Down(b) => format!("{} down", button(b)),
+        MouseEventKind::Up(b) => format!("{} up", button(b)),
+        MouseEventKind::Drag(b) => format!("{} drag", button(b)),
+        MouseEventKind::Moved => "moved".into(),
+        MouseEventKind::ScrollUp => "scroll up".into(),
+        MouseEventKind::ScrollDown => "scroll down".into(),
+        MouseEventKind::ScrollLeft => "scroll left".into(),
+        MouseEventKind::ScrollRight => "scroll right".into(),
+    };
+    format!("{kind} ({}, {})", m.column, m.row)
+}
+
 /// A keystroke, written the way the menu writes one.
 pub fn describe(k: &crossterm::event::KeyEvent) -> String {
     use crossterm::event::{KeyCode, KeyModifiers};
