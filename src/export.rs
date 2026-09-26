@@ -325,7 +325,13 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
         }
         if !e.kind.is_sketch() && e.h >= 4.0 {
             let tw = e.kind.short().chars().count() as f64;
-            items.push(Item::Text { x: px(e.x + (e.w - tw) / 2.0), y: py(e.y + 1.0), text: e.tag(), color: dim, font: None, size: 14.0 * s, bold: false, italic: false, underline: false, band: None });
+            items.push(Item::Text { x: px(e.x + (e.w - tw) / 2.0), y: py(e.y + 1.0), text: e.kind.short().into(), color: dim, font: None, size: 14.0 * s, bold: false, italic: false, underline: false, band: None });
+            // The deprecated mark after the kind, in red, as the screen draws it: a cell
+            // font advances 0.6 em a character, and the mark sits one space past the kind.
+            if let Some(m) = e.status.mark(false) {
+                let x = px(e.x + (e.w - tw) / 2.0) + (tw + 1.0) * 14.0 * s * 0.6;
+                items.push(Item::Text { x, y: py(e.y + 1.0), text: m.into(), color: paint_rgb(Paint::Red.into(), light), font: None, size: 14.0 * s, bold: true, italic: false, underline: false, band: None });
+            }
         }
         let size = e.text.size.map(|n| n as f64 * s * 0.8).unwrap_or(16.0 * s);
         let t = &e.text;
@@ -337,7 +343,17 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
         // The compartment, as the screen draws it: a rule, then the rows in the cell font.
         if let Some(ry) = e.header_rule() {
             items.push(Item::Line { a: (px(e.x + 1.0), py(ry + 0.5)), b: (px(e.right() - 1.0), py(ry + 0.5)), color, width: s.max(0.5) });
+            let gone = crate::model::Status::Deprecated.mark(false).unwrap_or_default();
             for (x, y, line) in e.row_lines() {
+                // A row opens with its mark: a deprecated one's ✗ is set apart, in red, and a
+                // space holds its cell so the row's columns do not move.
+                let line = match line.strip_prefix(gone) {
+                    Some(rest) => {
+                        items.push(Item::Text { x: px(x), y: py(y), text: gone.into(), color: paint_rgb(Paint::Red.into(), light), font: None, size: 16.0 * s, bold: true, italic: false, underline: false, band: None });
+                        format!(" {rest}")
+                    }
+                    None => line,
+                };
                 items.push(Item::Text { x: px(x), y: py(y), text: line, color: ink, font: None, size: 16.0 * s, bold: false, italic: false, underline: false, band: None });
             }
         }

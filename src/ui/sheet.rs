@@ -132,12 +132,16 @@ impl State {
         }
     }
 
-    /// The value `h`/`l` move to on a choice field.
+    /// The value `h`/`l` move to: the next choice on a choice field, one more or one less
+    /// on a number.
     pub fn cycled(&self, delta: isize, doc: &Document) -> Option<String> {
         let f = self.field()?;
         let names = match f.unit {
             Unit::Layer => form::layer_choices(doc),
-            u => u.choices()?,
+            u => match u.choices() {
+                Some(names) => names,
+                None => return u.step(&f.value, delta),
+            },
         };
         let n = names.len() as isize;
         // A value that is none of the choices — a `custom` look — steps onto the first one
@@ -180,9 +184,13 @@ impl Widget for Sheet<'_> {
         };
         let accent = if s.focused { accent } else { theme::t().dim };
         let inner = chrome::panel(buf, area, &title, accent);
+        // The panel is forty columns, so the hint is for the field under the cursor: a
+        // number's steps, or a choice's cycle — one line of everything was cut at "t la".
+        let number = s.field().is_some_and(|f| f.unit.is_number());
         let hint = match (s.focused, s.editing.is_some()) {
             (_, true) => " type, then esc or enter to leave the field",
-            (true, false) => " j/k field  i type  h/l cycle  t label  tab next  esc → diagram  q close",
+            (true, false) if number => " h/l ±1  H/L ±10  i type  j/k  esc",
+            (true, false) => " j/k field  h/l cycle  i type  t label",
             (false, false) => " c into the sheet   q closes",
         };
         let body = chrome::hint(buf, inner, hint);

@@ -989,8 +989,9 @@ impl App {
 
     /// The palette has picked a kind: place it, relate it, and go on to its label. On a
     /// freeform tab the relation is a plain link and needs no picking; on an architecture
-    /// tab the picker asks which kind, and the label waits for its answer.
-    fn open_off_finish(&mut self, from: ElementId, kind: ShapeKind) {
+    /// tab the picker asks which kind, and the label waits for its answer — unless the row
+    /// picked was a suggested line, `via`, which has answered already.
+    fn open_off_finish(&mut self, from: ElementId, kind: ShapeKind, via: Option<RelationKind>) {
         let (w, h) = kind.default_size();
         let port = self.pending_port.take();
         let (x, y) = match (port, self.doc.element(from)) {
@@ -1022,6 +1023,12 @@ impl App {
             self.pending_label = Some(id);
             self.pending_port = port;
             self.relpick = Some(relpick::State::new(&self.doc, from, id, None));
+            // A suggested line is the picker answered in advance: the same path, so the
+            // anchoring, the landing and the label all happen the one way they always do.
+            if let Some(r) = via {
+                let verdict = crate::ontology::allowed(r, self.doc.element(from).map_or(kind, |e| e.kind), kind);
+                self.apply_relpick(r, verdict);
+            }
         }
     }
 
@@ -2299,17 +2306,36 @@ impl App {
                     None => {}
                 }
             }
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('l') | KeyCode::Right | KeyCode::Char(' ') => {
+            KeyCode::Char('h' | 'H' | 'l' | 'L') | KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
                 // Space flips a yes/no and is otherwise the same as l.
-                let delta = if matches!(k.code, KeyCode::Char('h') | KeyCode::Left) { -1 } else { 1 };
-                if let (Some(target), Some(value), Some(name)) = (sh.target, sh.cycled(delta, &self.doc), sh.field().map(|f| f.name)) {
-                    self.checkpoint();
-                    if let Err(why) = form::apply_for(&mut self.doc, target, name, &value, &self.selection) {
-                        self.undo.pop();
-                        self.say(why, Tone::Bad);
-                    } else if let Some(sh) = &mut self.sheet {
-                        sh.refresh(&self.doc);
+                let delta = if matches!(k.code, KeyCode::Char('h' | 'H') | KeyCode::Left) { -1 } else { 1 };
+                // H/L on a number are ten single steps rather than one of ten, so a big step
+                // stops at the limit — `apply`'s — instead of being refused short of it. On a
+                // choice they are h/l: ten choices along is nowhere anyone is aiming for.
+                let number = sh.field().is_some_and(|f| f.unit.is_number());
+                let times = if matches!(k.code, KeyCode::Char('H' | 'L')) && number { form::Unit::BIG_STEP } else { 1 };
+                let (Some(target), Some(name)) = (sh.target, sh.field().map(|f| f.name)) else { return };
+                self.checkpoint();
+                let mut moved = 0;
+                for _ in 0..times {
+                    let Some(value) = self.sheet.as_ref().and_then(|sh| sh.cycled(delta, &self.doc)) else { break };
+                    match form::apply_for(&mut self.doc, target, name, &value, &self.selection) {
+                        Ok(()) => {
+                            moved += 1;
+                            if let Some(sh) = &mut self.sheet {
+                                sh.refresh(&self.doc);
+                            }
+                        }
+                        Err(why) => {
+                            if moved == 0 {
+                                self.say(why, Tone::Bad);
+                            }
+                            break;
+                        }
                     }
+                }
+                if moved == 0 {
+                    self.undo.pop();
                 }
             }
             _ => {}
@@ -2492,14 +2518,14 @@ impl App {
             }),
             KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => p.retype(|f| f.push(c)),
             KeyCode::Enter => {
-                let picked = p.picked();
+                let (picked, via) = (p.picked(), p.via());
                 let purpose = p.purpose;
                 self.palette = None;
                 match (picked, purpose) {
                     (Some(kind), palette::Purpose::Add) => self.add_kind(kind),
                     (Some(kind), palette::Purpose::Relate(_)) => {
                         if let Some(from) = self.cursor {
-                            self.open_off_finish(from, kind);
+                            self.open_off_finish(from, kind, via);
                         }
                     }
                     (None, _) => {}
@@ -3127,7 +3153,7 @@ impl App {
             f.render_widget(palette::Palette { state: p }, area);
         }
         if let Some(p) = &self.relpick {
-            let area = chrome::centered(body, relpick::WIDTH, relpick::height(body.height));
+            let area = chrome::centered(body, relpick::WIDTH, relpick::height(p, body.height));
             f.render_widget(relpick::Picker { state: p, doc: &self.doc }, area);
         }
         if let Some(h) = &self.help {
@@ -3808,6 +3834,28 @@ mod tests {
     }
 
     #[test]
+    fn a_suggested_line_off_an_object_type_is_drawn_without_the_picker() {
+        let mut a = app();
+        a.run_excmd("kind ontology".into());
+        a.run_excmd("add object_type".into());
+        press(&mut a, "Truck");
+        key(&mut a, KeyCode::Esc);
+        let truck = a.cursor.unwrap();
+        press(&mut a, "o");
+        let p = a.palette.as_ref().unwrap();
+        assert_eq!(p.via(), Some(RelationKind::Realization), "the palette opens on the first suggested line");
+        press(&mut a, "implements");
+        key(&mut a, KeyCode::Enter);
+        assert!(a.relpick.is_none(), "the line was the answer: no picker");
+        let r = a.doc.relations.iter().find(|r| r.from == truck).expect("drawn from the object type");
+        assert_eq!((r.kind, a.doc.element(r.to).unwrap().kind), (RelationKind::Implements, ShapeKind::Interface));
+        assert!(a.insert.is_some(), "and the new interface's label is next");
+        press(&mut a, "Vehicle");
+        key(&mut a, KeyCode::Esc);
+        assert!(a.doc.lint().is_empty());
+    }
+
+    #[test]
     fn o_on_a_freeform_tab_draws_a_plain_link_and_asks_nothing() {
         let mut a = app();
         a.run_excmd("tabnew freeform sketch".into());
@@ -4128,6 +4176,54 @@ mod tests {
         press(&mut a, "uuu");
         let e = a.doc.element(x).unwrap();
         assert_eq!((e.w, e.kind, e.label.as_str()), (16.0, ShapeKind::ApplicationComponent, "CRM"), "one undo step per field");
+    }
+
+    #[test]
+    fn h_and_l_step_a_number_on_the_sheet_as_they_cycle_a_choice() {
+        let mut a = app();
+        let (x, _) = two(&mut a);
+        a.set_cursor(x);
+        press(&mut a, "c");
+        while a.sheet.as_ref().unwrap().tab != form::Tab::Arrange {
+            key(&mut a, KeyCode::Tab);
+        }
+        while a.sheet.as_ref().unwrap().field().unwrap().name != "width" {
+            press(&mut a, "j");
+        }
+        let w = a.doc.element(x).unwrap().w;
+        press(&mut a, "ll");
+        assert_eq!(a.doc.element(x).unwrap().w, w + 2.0, "l steps up by one, each press");
+        press(&mut a, "h");
+        assert_eq!(a.doc.element(x).unwrap().w, w + 1.0);
+        assert_eq!(a.sheet.as_ref().unwrap().field().unwrap().value, format!("{}", w + 1.0), "the sheet shows it at once");
+        // Past the floor, apply's own words, and nothing changes.
+        a.doc.element_mut(x).unwrap().w = 4.0;
+        a.sheet.as_mut().unwrap().refresh(&a.doc);
+        press(&mut a, "h");
+        assert_eq!(a.doc.element(x).unwrap().w, 4.0);
+        key(&mut a, KeyCode::Esc);
+        press(&mut a, "u");
+        assert_eq!(a.doc.element(x).unwrap().w, w + 2.0, "each step is one undo — the refused one left none");
+        // H/L: ten at a time, one undo, and a big step stops at the limit rather than short of it.
+        press(&mut a, "c");
+        press(&mut a, "L");
+        assert_eq!(a.doc.element(x).unwrap().w, w + 12.0);
+        a.doc.element_mut(x).unwrap().w = 7.0;
+        a.sheet.as_mut().unwrap().refresh(&a.doc);
+        press(&mut a, "H");
+        assert_eq!(a.doc.element(x).unwrap().w, 4.0, "7 less ten stops at width's floor of 4");
+        key(&mut a, KeyCode::Esc);
+        press(&mut a, "u");
+        assert_eq!(a.doc.element(x).unwrap().w, 7.0, "the whole big step is one undo");
+        // On a choice, H/L are h/l: one along.
+        press(&mut a, "c");
+        while a.sheet.as_ref().unwrap().field().unwrap().name != "kind" {
+            press(&mut a, "k");
+        }
+        let kind = a.doc.element(x).unwrap().kind;
+        press(&mut a, "L");
+        let next = ShapeKind::ALL[(ShapeKind::ALL.iter().position(|k| *k == kind).unwrap() + 1) % ShapeKind::ALL.len()];
+        assert_eq!(a.doc.element(x).unwrap().kind, next);
     }
 
     #[test]
@@ -4881,9 +4977,31 @@ mod tests {
         assert!(xml.contains("«interface» Place") && xml.contains("dashed=1;"), "an interface is a dashed class: {xml}");
         assert!(xml.contains("opacity=50;"), "a deprecated type fades");
         let e = a.doc.element(x).unwrap();
-        assert_eq!(e.tag(), "object †");
+        assert_eq!((e.tag(), e.tag_marked(true)), ("object ✗".into(), "object x".into()));
         assert_eq!(a.doc.element(y).unwrap().drawn_line(), crate::ontology::LineStyle::Dashed);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_deprecated_type_and_row_wear_a_red_x_and_nothing_else_is_red() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut a = app();
+        a.doc.metadata.view = View::Ontology;
+        let x = a.doc.add(ShapeKind::ObjectType, "Airport", 2.0, 2.0);
+        let mut old = crate::model::Property::new("iata");
+        old.status = crate::model::Status::Deprecated;
+        let e = a.doc.element_mut(x).unwrap();
+        e.properties = vec![crate::model::Property::new("code"), old];
+        e.status = crate::model::Status::Deprecated;
+        e.h = 10.0;
+        a.cursor = None;
+        let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let marks: Vec<_> = buf.content.iter().filter(|c| c.symbol() == "✗").collect();
+        assert_eq!(marks.len(), 2, "one on the tag, one on the row");
+        assert!(marks.iter().all(|c| c.fg == theme::t().red), "both red");
+        assert!(!buf.content.iter().any(|c| c.symbol() == "†"), "the dagger is gone");
     }
 
     #[test]
@@ -5142,6 +5260,28 @@ mod eyeball {
         a.doc.metadata.page.grid_style = crate::model::GridStyle::Lines;
         a.set_cursor(x);
         let mut term = Terminal::new(TestBackend::new(64, 14)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        eprintln!("{}", dump(&term));
+    }
+
+    /// `cargo test eyeball_branching -- --ignored --nocapture`: `o` off an object type — the
+    /// palette with its suggested lines on top — and then the picker, grouped by family.
+    #[test]
+    #[ignore]
+    fn eyeball_branching() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut a = App::new();
+        a.loading = false;
+        a.run_excmd("kind ontology".into());
+        let t = a.doc.add(ShapeKind::ObjectType, "Truck", 4.0, 2.0);
+        a.set_cursor(t);
+        a.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        let mut term = Terminal::new(TestBackend::new(110, 34)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        eprintln!("{}\n", dump(&term));
+        a.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let i = a.doc.add(ShapeKind::Interface, "Vehicle", 40.0, 2.0);
+        a.relpick = Some(relpick::State::new(&a.doc, t, i, None));
         term.draw(|f| a.draw(f)).unwrap();
         eprintln!("{}", dump(&term));
     }

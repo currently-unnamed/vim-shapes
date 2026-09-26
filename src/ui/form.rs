@@ -128,6 +128,36 @@ impl Unit {
             _ => return None,
         })
     }
+
+    /// Whether `h`/`l` step this field rather than cycle it.
+    pub fn is_number(self) -> bool {
+        matches!(self, Unit::Cells | Unit::Px)
+    }
+
+    /// How many steps `H`/`L` take at once on a number: a page width of 2000 is two hundred
+    /// presses at one, and twenty at ten, and ten is still small enough to land by eye.
+    pub const BIG_STEP: usize = 10;
+
+    /// What `h`/`l` step a number to: one more or one less, as text for [`apply`].
+    ///
+    /// Only the step lives here; the bounds stay in `apply`, so stepping past one says the
+    /// same thing typing past it would ("width cannot be less than 4") rather than a second
+    /// copy of each limit that could drift from the first. A blank number means "auto", and
+    /// steps from where auto is: the rendering's 20 px for a size, and nothing for cells —
+    /// `l` starts it at one, and `h` has nowhere below auto to go.
+    pub fn step(self, value: &str, delta: isize) -> Option<String> {
+        if !self.is_number() {
+            return None;
+        }
+        let blank = value.trim().is_empty();
+        let n: i64 = match self {
+            Unit::Px if blank => 20,
+            Unit::Cells if blank && delta < 0 => return None,
+            Unit::Cells if blank => 0,
+            _ => value.trim().parse().ok()?,
+        };
+        Some((n + delta as i64).to_string())
+    }
 }
 
 /// The layer names, back to front — what the `layer` field cycles.
@@ -896,9 +926,25 @@ mod tests {
     }
 
     #[test]
+    fn a_number_steps_by_one_and_auto_steps_from_where_auto_is() {
+        assert_eq!(Unit::Cells.step("12", 1).as_deref(), Some("13"));
+        assert_eq!(Unit::Cells.step("-3", -1).as_deref(), Some("-4"), "x and skew go negative");
+        assert_eq!(Unit::Px.step("", 1).as_deref(), Some("21"), "blank size is the rendering's 20");
+        assert_eq!(Unit::Cells.step("", 1).as_deref(), Some("1"));
+        assert_eq!(Unit::Cells.step("", -1), None, "nothing below auto");
+        // The floor is apply's: a step past it is refused in the words typing would get.
+        let mut doc = Document::default();
+        let id = doc.add(ShapeKind::Box, "a", 0.0, 0.0);
+        doc.element_mut(id).unwrap().w = 4.0;
+        let below = Unit::Cells.step("4", -1).unwrap();
+        assert!(apply(&mut doc, Target::Element(id), "width", &below).unwrap_err().contains("less than 4"));
+    }
+
+    #[test]
     fn a_kind_field_cycles_and_a_number_field_does_not() {
         assert_eq!(Unit::ShapeKind.choices().unwrap()[1], "driver");
         assert!(Unit::Cells.choices().is_none());
+        assert_eq!(Unit::ShapeKind.step("driver", 1), None, "a choice cycles; it does not step");
         assert_eq!(Unit::Align.choices().unwrap(), ["left", "centre", "right"]);
         let fonts = Unit::Font.choices().unwrap();
         assert_eq!(fonts[0], "", "the default comes first");

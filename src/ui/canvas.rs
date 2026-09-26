@@ -350,6 +350,9 @@ impl Scene<'_> {
                 if !e.kind.is_sketch() && e.h >= 4.0 && inner_w > tag.chars().count() + 1 {
                     let tw = tag.chars().count() as f64;
                     put(buf, e.x + (e.w - tw) / 2.0, e.y + 1.0, &tag, tag_style);
+                    if let Some(m) = e.status.mark(false) {
+                        put(buf, e.x + (e.w - tw) / 2.0 + tw - 1.0, e.y + 1.0, m, tag_style.fg(theme::t().red));
+                    }
                 }
                 if self.labels || typing {
                     for (x, y, l) in label_lines(e, &label) {
@@ -366,8 +369,13 @@ impl Scene<'_> {
                     // On the cursor's tint the rows are the ink: the inverse is the label's
                     // colour on the saturated yellow, and unreadable on the pale tint.
                     let row_style = if on && self.focus_rel.is_none() { Style::new().fg(theme::t().ink).bg(theme::t().hilite) } else { Style::new().fg(theme::t().ink) };
+                    let gone = crate::model::Status::Deprecated.mark(false).unwrap_or_default();
                     for (x, y, l) in e.row_lines() {
                         put(buf, x, y, &l, row_style);
+                        // A row opens with its mark, so a row that opens with ✗ wears it.
+                        if l.starts_with(gone) {
+                            put(buf, x, y, gone, row_style.fg(theme::t().red));
+                        }
                     }
                 }
             }

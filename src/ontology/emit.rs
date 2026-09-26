@@ -108,6 +108,7 @@ fn relation(r: RelationKind) -> Value {
     let mut m = Map::new();
     m.insert("kind".into(), json!(r.name()));
     m.insert("verb".into(), json!(r.verb()));
+    m.insert("family".into(), json!(r.family().name()));
     m.insert("tagline".into(), json!(r.tagline()));
     m.insert("summary".into(), json!(r.summary()));
     // Which sources may take this relation to which targets — the rules, tabulated. A model

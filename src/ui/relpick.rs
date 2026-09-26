@@ -4,10 +4,15 @@
 //! in full colour, the rest dimmed with the reason beside them. The rules are advisory, so a
 //! dimmed row can still be chosen — the relation is drawn and marked, and `:lint` will list it
 //! — but the reason is on screen at the one moment it can change a mind.
+//!
+//! Both halves are grouped by [`Family`] — structural, dependency, dynamic, the ontology's
+//! schema and its action rules, other — so the lit half reads as the sorts of thing you could
+//! be saying here, and from an ontology shape the architecture's families sink, whole, into
+//! the refused half.
 
 use super::{chrome, theme};
 use crate::model::{Document, ElementId, RelationId};
-use crate::ontology::{self, RelationKind};
+use crate::ontology::{self, Family, RelationKind};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -56,8 +61,34 @@ impl State {
 
 pub const WIDTH: u16 = 96;
 
-pub fn height(avail: u16) -> u16 {
-    ((RelationKind::ALL.len() + 3) as u16).min(avail)
+pub fn height(state: &State, avail: u16) -> u16 {
+    ((lines(state).len() + 3) as u16).min(avail)
+}
+
+enum Row {
+    /// Where the lit half ends and the refused half begins.
+    Refused,
+    Family(Family, bool),
+    Item(usize),
+}
+
+/// The rows with their headings: a family heading wherever the family changes, and once
+/// more after the refused divider, since both halves run in family order.
+fn lines(state: &State) -> Vec<Row> {
+    let mut out = Vec::new();
+    let mut last: Option<(Family, bool)> = None;
+    for (i, (k, verdict)) in state.rows.iter().enumerate() {
+        let lit = verdict.is_ok();
+        if !lit && last.is_none_or(|(_, l)| l) {
+            out.push(Row::Refused);
+        }
+        if last != Some((k.family(), lit)) {
+            out.push(Row::Family(k.family(), lit));
+        }
+        last = Some((k.family(), lit));
+        out.push(Row::Item(i));
+    }
+    out
 }
 
 pub struct Picker<'a> {
@@ -72,12 +103,30 @@ impl Widget for Picker<'_> {
         let inner = chrome::panel(buf, area, &title, theme::t().yellow);
         let body = chrome::hint(buf, inner, " j/k pick   enter draw   esc   dimmed: the rules refuse it — drawn anyway, and marked");
         let cols = body.width as usize;
-        let lines: Vec<Line> = self
-            .state
-            .rows
+        let all = lines(self.state);
+        // Keep the selection in view: the refused half runs past the bottom of most screens.
+        let view = body.height as usize;
+        let cur = all.iter().position(|r| matches!(r, Row::Item(i) if *i == self.state.sel)).unwrap_or(0);
+        let off = cur.saturating_sub(view.saturating_sub(2)).min(all.len().saturating_sub(view));
+        let lines: Vec<Line> = all
             .iter()
-            .enumerate()
-            .map(|(i, (k, verdict))| {
+            .skip(off)
+            .take(view)
+            .map(|row| {
+                let i = match row {
+                    Row::Refused => {
+                        return Line::styled(" refused here — drawn anyway, and marked", Style::new().fg(theme::t().dim).bold());
+                    }
+                    Row::Family(f, lit) => {
+                        let fs = if *lit { Style::new().fg(theme::t().yellow).italic() } else { Style::new().fg(theme::t().dim).italic() };
+                        return Line::from(vec![
+                            Span::styled(format!(" ── {} ", f.name()), fs),
+                            Span::styled(format!("· {}", f.tagline()), Style::new().fg(theme::t().dim).italic()),
+                        ]);
+                    }
+                    Row::Item(i) => *i,
+                };
+                let (k, verdict) = &self.state.rows[i];
                 let on = i == self.state.sel;
                 let head = format!("{}{:<15}", chrome::marker(on), k.name());
                 match verdict {
@@ -128,6 +177,34 @@ mod tests {
         let first_refused = st.rows.iter().position(|(_, v)| v.is_err()).unwrap();
         assert!(st.rows[..first_refused].iter().all(|(_, v)| v.is_ok()));
         assert_eq!(st.picked().map(|p| p.0), Some(RelationKind::Realization), "component realizes service is the best line here");
+    }
+
+    #[test]
+    fn from_an_object_type_the_schema_is_lit_and_the_architecture_sinks_whole() {
+        let mut doc = Document::default();
+        let a = doc.add(ShapeKind::ObjectType, "", 0.0, 0.0);
+        let b = doc.add(ShapeKind::Interface, "", 30.0, 0.0);
+        let st = State::new(&doc, a, b, None);
+        assert_eq!(st.picked().map(|p| p.0), Some(RelationKind::LinkType), "the schema leads");
+        let heads: Vec<(Family, bool)> = lines(&st).iter().filter_map(|r| if let Row::Family(f, l) = r { Some((*f, *l)) } else { None }).collect();
+        assert_eq!(heads[0], (Family::Schema, true));
+        assert!(heads.contains(&(Family::Structural, false)), "structural is refused here, as a family");
+        assert_eq!(heads.iter().filter(|h| h.0 == Family::Structural).count(), 1, "one heading per family per half: {heads:?}");
+    }
+
+    #[test]
+    fn the_selection_stays_on_screen_in_a_short_picker() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut doc = Document::default();
+        let a = doc.add(ShapeKind::ObjectType, "", 0.0, 0.0);
+        let b = doc.add(ShapeKind::Interface, "", 30.0, 0.0);
+        let mut st = State::new(&doc, a, b, None);
+        st.move_by(-1);
+        let last = st.picked().unwrap().0.name();
+        let mut term = Terminal::new(TestBackend::new(WIDTH, 12)).unwrap();
+        term.draw(|f| f.render_widget(Picker { state: &st, doc: &doc }, f.area())).unwrap();
+        let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(out.contains(chrome::marker(true)) && out.contains(last), "the last row, {last}, is scrolled to");
     }
 
     #[test]

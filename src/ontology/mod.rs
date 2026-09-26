@@ -1583,8 +1583,11 @@ impl End {
 }
 
 impl RelationKind {
-    /// Picker order: structural first, then dependency, then dynamic, then the catch-alls —
-    /// association, which says the least, and the plain link, which says nothing at all.
+    /// Picker order, family by family ([`Family::ALL`]'s order, which a test holds it to):
+    /// structural, dependency, dynamic, the ontology's schema and its action rules, and last
+    /// the others — specialization, then association, which says the least, and the plain
+    /// link, which says nothing at all. Association and link must stay last: the picker's
+    /// default is the first allowed row, and that has to be the most specific one.
     pub const ALL: [RelationKind; 23] = [
         Composition,
         Aggregation,
@@ -1595,21 +1598,39 @@ impl RelationKind {
         Influence,
         Triggering,
         Flow,
-        Specialization,
         LinkType,
         Implements,
         Extends,
+        Uses,
+        BackedBy,
         Creates,
         Modifies,
         Deletes,
         Links,
         Unlinks,
         Calls,
-        Uses,
-        BackedBy,
+        Specialization,
         Association,
         Link,
     ];
+
+    /// Which family of relation this is — how the picker and the palette group them.
+    pub fn family(self) -> Family {
+        match self {
+            Composition | Aggregation | Assignment | Realization => Family::Structural,
+            Serving | Access | Influence => Family::Dependency,
+            Triggering | Flow => Family::Dynamic,
+            LinkType | Implements | Extends | Uses | BackedBy => Family::Schema,
+            Creates | Modifies | Deletes | Links | Unlinks | Calls => Family::Rules,
+            Specialization | Association | Link => Family::Other,
+        }
+    }
+
+    /// Whether this relation says anything in particular. Association and the plain link
+    /// are allowed everywhere, which is exactly why neither is ever a suggestion.
+    pub fn is_specific(self) -> bool {
+        !matches!(self, Association | Link)
+    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -1767,6 +1788,84 @@ impl RelationKind {
             Link => n(Solid, End::None, End::Arrow),
         }
     }
+}
+
+/// The families relations come in — the picker's headings, and the palette's.
+///
+/// The first three are the architecture's own grouping of its relationships: what a thing is
+/// made of and what makes it real, what uses what, and what happens in what order. The
+/// ontology layer's relations are two families of their own — how its types fit together, and
+/// what an action does when it runs. Everything else is `Other`, which is last because it
+/// holds the two lines that say the least.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Family {
+    Structural,
+    Dependency,
+    Dynamic,
+    Schema,
+    Rules,
+    Other,
+}
+
+impl Family {
+    pub const ALL: [Family; 6] = [Family::Structural, Family::Dependency, Family::Dynamic, Family::Schema, Family::Rules, Family::Other];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Family::Structural => "structural",
+            Family::Dependency => "dependency",
+            Family::Dynamic => "dynamic",
+            Family::Schema => "ontology schema",
+            Family::Rules => "action rules",
+            Family::Other => "other",
+        }
+    }
+
+    pub fn tagline(self) -> &'static str {
+        match self {
+            Family::Structural => "what it is made of, who performs it, what makes it real",
+            Family::Dependency => "what serves, uses or reads what",
+            Family::Dynamic => "what starts what, and what moves between them",
+            Family::Schema => "how the ontology's types fit together",
+            Family::Rules => "what an action type does to objects when it runs",
+            Family::Other => "is-a, and the lines that say the least",
+        }
+    }
+}
+
+/// How many kinds a relation may reach from a shape and still be *suggested* from it.
+///
+/// A relation that can go to only a handful of kinds from here is a specific claim —
+/// an object type implements an interface, an action calls a function, a component realizes
+/// its service — and those are the lines worth putting first. One that can go to a dozen
+/// kinds (serving, triggering) is still offered, just not first: suggesting it would suggest
+/// everything. Four keeps an object type's whole schema and a component's structure, and
+/// leaves out the relations that fan out across a layer.
+pub const SUGGEST_AT_MOST: usize = 4;
+
+/// The lines worth drawing first from a shape of kind `from`, on a diagram of `view`: each
+/// specific relation that may reach at most [`SUGGEST_AT_MOST`] of the kinds the view shows,
+/// paired with each of those kinds — in picker order, then palette order.
+///
+/// Composites and plain shapes are left out as targets: a grouping takes any part, and a
+/// plain shape any line, so counting them would make every relation look like it fans out.
+/// A plain shape or a freeform tab has no suggestions at all; the rules have nothing to say.
+pub fn suggestions(from: ShapeKind, view: View) -> Vec<(RelationKind, ShapeKind)> {
+    if view == View::Freeform || from.layer() == Layer::Sketch {
+        return Vec::new();
+    }
+    let targets: Vec<ShapeKind> = ShapeKind::ALL
+        .into_iter()
+        .filter(|k| view.shows(*k) && !matches!(k.layer(), Layer::Sketch | Layer::Composite))
+        .collect();
+    let mut out = Vec::new();
+    for r in RelationKind::ALL.into_iter().filter(|r| r.is_specific()) {
+        let reach: Vec<ShapeKind> = targets.iter().copied().filter(|k| allowed(r, from, *k).is_ok()).collect();
+        if reach.len() <= SUGGEST_AT_MOST {
+            out.extend(reach.into_iter().map(|k| (r, k)));
+        }
+    }
+    out
 }
 
 // ─── the rules ──────────────────────────────────────────────────────────────

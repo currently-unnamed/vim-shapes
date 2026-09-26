@@ -5,9 +5,15 @@
 //! the term: typing `server` finds Node, typing `database` finds Data Object. Rows are grouped
 //! by layer, and only the layers the diagram's view is about are offered — a menu of
 //! possibilities rather than of choices. `:add <kind>` skips the search entirely.
+//!
+//! Opened off a shape, it is also a menu of lines. Above the kinds come the SUGGESTED
+//! lines from here — [`ontology::suggestions`], a relation and a kind together, grouped by
+//! family — so that an object type opens with its schema on top: link-type, implements,
+//! uses, backed-by. Nothing is hidden to make room for them; every kind is still listed
+//! below, and picking one of those asks the relation afterwards, as it always has.
 
 use super::{chrome, theme};
-use crate::ontology::{self, Layer, RelationKind, ShapeKind, View};
+use crate::ontology::{self, Family, Layer, RelationKind, ShapeKind, View};
 use crate::shapes::{self, CurvePrimitive};
 use ratatui::prelude::*;
 use ratatui::symbols::Marker;
@@ -50,8 +56,9 @@ fn picture(kind: ShapeKind, width: u16) -> impl Widget {
 }
 
 pub struct State {
-    /// Index into `rows()`, *not* into `ShapeKind::ALL` — the list under the cursor is the
-    /// filtered one, so that is the list the cursor indexes.
+    /// Index into `entries()` — the suggested lines, then `rows()` — *not* into
+    /// `ShapeKind::ALL`: the list under the cursor is the filtered one, so that is the list
+    /// the cursor indexes.
     pub sel: usize,
     pub filter: String,
     pub view: View,
@@ -104,35 +111,58 @@ impl State {
     pub fn specific(&self, k: ShapeKind) -> bool {
         match self.purpose {
             Purpose::Add => true,
-            Purpose::Relate(from) => RelationKind::ALL
-                .iter()
-                .any(|r| !matches!(r, RelationKind::Association | RelationKind::Link) && ontology::allowed(*r, from, k).is_ok()),
+            Purpose::Relate(from) => RelationKind::ALL.iter().any(|r| r.is_specific() && ontology::allowed(*r, from, k).is_ok()),
         }
+    }
+
+    fn query(&self) -> String {
+        self.filter.trim().to_ascii_lowercase()
+    }
+
+    fn matches(k: ShapeKind, f: &str) -> bool {
+        f.is_empty()
+            || k.name().to_ascii_lowercase().contains(f)
+            || k.slug().contains(f)
+            || k.short().contains(f)
+            || k.tagline().to_ascii_lowercase().contains(f)
+            || k.layer().name().contains(f)
     }
 
     /// The kinds this palette is showing, filtered and in layer order.
     pub fn rows(&self) -> Vec<ShapeKind> {
-        let f = self.filter.trim().to_ascii_lowercase();
-        ShapeKind::ALL
+        let f = self.query();
+        ShapeKind::ALL.into_iter().filter(|k| self.view.shows(*k) && Self::matches(*k, &f)).collect()
+    }
+
+    /// The suggested lines from the shape this palette was opened off, filtered: typing
+    /// `impl` finds implements as readily as `interface` finds the interface.
+    pub fn suggested(&self) -> Vec<(RelationKind, ShapeKind)> {
+        let Purpose::Relate(from) = self.purpose else { return Vec::new() };
+        let f = self.query();
+        ontology::suggestions(from, self.view)
             .into_iter()
-            .filter(|k| self.view.shows(*k))
-            .filter(|k| {
-                f.is_empty()
-                    || k.name().to_ascii_lowercase().contains(&f)
-                    || k.slug().contains(&f)
-                    || k.short().contains(&f)
-                    || k.tagline().to_ascii_lowercase().contains(&f)
-                    || k.layer().name().contains(&f)
-            })
+            .filter(|(r, k)| Self::matches(*k, &f) || r.name().contains(&f) || r.family().name().contains(&f))
             .collect()
     }
 
+    /// Everything the cursor can land on, in order: the suggested lines, then every kind.
+    pub fn entries(&self) -> Vec<(Option<RelationKind>, ShapeKind)> {
+        let mut out: Vec<(Option<RelationKind>, ShapeKind)> = self.suggested().into_iter().map(|(r, k)| (Some(r), k)).collect();
+        out.extend(self.rows().into_iter().map(|k| (None, k)));
+        out
+    }
+
     pub fn picked(&self) -> Option<ShapeKind> {
-        self.rows().get(self.sel).copied()
+        self.entries().get(self.sel).map(|e| e.1)
+    }
+
+    /// The relation the picked row already names, when it is a suggested line.
+    pub fn via(&self) -> Option<RelationKind> {
+        self.entries().get(self.sel).and_then(|e| e.0)
     }
 
     pub fn move_by(&mut self, delta: isize) {
-        let n = self.rows().len();
+        let n = self.entries().len();
         if n == 0 {
             self.sel = 0;
             return;
@@ -153,14 +183,35 @@ pub fn height(avail: u16) -> u16 {
 }
 
 enum Row {
+    /// Above the suggested lines, or above every kind when there were some.
+    Section(&'static str),
+    Family(Family),
+    Line(usize, RelationKind, ShapeKind),
     Head(Layer),
     Item(usize, ShapeKind),
 }
 
 fn rows(state: &State) -> Vec<Row> {
     let mut out = Vec::new();
+    let suggested = state.suggested();
+    let mut family = None;
+    for (i, (r, k)) in suggested.iter().enumerate() {
+        if i == 0 {
+            out.push(Row::Section("suggested — the lines that say the most from here"));
+        }
+        if family != Some(r.family()) {
+            family = Some(r.family());
+            out.push(Row::Family(r.family()));
+        }
+        out.push(Row::Line(i, *r, *k));
+    }
+    let skip = suggested.len();
+    if skip > 0 {
+        out.push(Row::Section("every kind of shape — the relation is asked next"));
+    }
     let mut layer = None;
     for (i, k) in state.rows().into_iter().enumerate() {
+        let i = i + skip;
         if layer != Some(k.layer()) {
             layer = Some(k.layer());
             out.push(Row::Head(k.layer()));
@@ -188,7 +239,7 @@ impl Widget for Palette<'_> {
             (Purpose::Add, ..) => " type to search   ↑/↓ pick   enter add   esc",
             (_, true, true) => " hjkl / yubn change the direction   tab back to the search   enter add and relate   esc",
             (_, true, false) => " type to search   ↑/↓ pick   ^hjkl / ^yubn or tab: the direction   enter add and relate   esc",
-            (Purpose::Relate(_), ..) => " type to search   ↑/↓ pick   enter add and relate   esc   dimmed: only an association from here",
+            (Purpose::Relate(_), ..) => " type to search   ↑/↓ pick   enter add and relate   esc   on top: suggested lines   dimmed: only an association",
         };
         let body = chrome::hint(buf, inner, hint);
         // The search line on top.
@@ -209,7 +260,7 @@ impl Widget for Palette<'_> {
         let view = list.height as usize;
         let cur = all
             .iter()
-            .position(|r| matches!(r, Row::Item(i, _) if *i == self.state.sel))
+            .position(|r| matches!(r, Row::Item(i, _) | Row::Line(i, ..) if *i == self.state.sel))
             .unwrap_or(0);
         let max_off = all.len().saturating_sub(view);
         let off = cur.saturating_sub(view / 2).min(max_off);
@@ -222,6 +273,21 @@ impl Widget for Palette<'_> {
         }
         for row in all.iter().skip(off).take(view) {
             lines.push(match row {
+                Row::Section(s) => Line::styled(format!(" {s}"), Style::new().fg(theme::t().bright).bold()),
+                // The name only: the list column is too narrow for the tagline, and the
+                // picked line's own words are in the detail beside it.
+                Row::Family(f) => Line::styled(format!(" ── {}", f.name()), Style::new().fg(theme::t().yellow).italic()),
+                Row::Line(i, r, k) => {
+                    let on = *i == self.state.sel;
+                    let head = format!("{}{:<11}", chrome::marker(on), r.name());
+                    let (hs, ks) = if on {
+                        let s = Style::new().fg(theme::t().inverse).bg(theme::t().yellow).bold();
+                        (s, s)
+                    } else {
+                        (Style::new().fg(theme::t().yellow).bold(), Style::new().fg(theme::layer_color(k.layer())))
+                    };
+                    Line::from(vec![Span::styled(head, hs), Span::styled(format!(" → {}", k.name()), ks)])
+                }
                 Row::Head(l) => Line::styled(
                     format!(" ── {} ", l.name()),
                     Style::new().fg(theme::layer_color(*l)).italic(),
@@ -271,6 +337,24 @@ impl Widget for Palette<'_> {
                 Rect { y: detail.y + 5, height: detail.height.saturating_sub(5), ..detail }
             }
             None => detail,
+        };
+        // A suggested line: what the relation says, before what the kind is.
+        let detail = match (self.state.via(), self.state.purpose) {
+            (Some(r), Purpose::Relate(from)) if detail.height > 4 => {
+                let mut d: Vec<Line> = vec![Line::from(vec![
+                    Span::styled(format!("{} ", from.name()), Style::new().fg(theme::layer_color(from.layer()))),
+                    Span::styled(r.verb(), Style::new().fg(theme::t().yellow).bold()),
+                    Span::styled(format!(" {}", self.state.picked().map(|k| k.name()).unwrap_or("?")), Style::new().fg(theme::t().ink)),
+                ])];
+                for l in chrome::wrap(r.tagline(), detail.width as usize) {
+                    d.push(Line::styled(l, Style::new().fg(theme::t().muted)));
+                }
+                d.push(Line::raw(""));
+                let used = (d.len() as u16).min(detail.height);
+                Paragraph::new(d).render(Rect { height: used, ..detail }, buf);
+                Rect { y: detail.y + used, height: detail.height - used, ..detail }
+            }
+            _ => detail,
         };
         if let Some(k) = self.state.picked() {
             let head: Vec<Line> = vec![
@@ -353,6 +437,37 @@ mod tests {
         assert!(s.specific(ShapeKind::ApplicationService), "a component realizes a service");
         assert!(!s.specific(ShapeKind::Stakeholder), "a component and a stakeholder can only be associated");
         assert!(State::new(View::Free).specific(ShapeKind::Stakeholder), "adding dims nothing");
+    }
+
+    #[test]
+    fn an_object_type_opens_with_its_schema_on_top_and_every_kind_still_below() {
+        let s = State::relating(View::Ontology, ShapeKind::ObjectType, None);
+        let e = s.entries();
+        assert_eq!(e.first(), Some(&(Some(RelationKind::Realization), ShapeKind::BusinessObject)), "the twin first: structural leads");
+        assert!(e.contains(&(Some(RelationKind::Implements), ShapeKind::Interface)));
+        assert!(e.contains(&(Some(RelationKind::BackedBy), ShapeKind::Datasource)));
+        let kinds: Vec<ShapeKind> = e.iter().filter(|(r, _)| r.is_none()).map(|(_, k)| *k).collect();
+        assert_eq!(kinds, s.rows(), "every kind the view shows is still offered, after the lines");
+        assert!(kinds.contains(&ShapeKind::ActionType), "including the ones no suggestion reaches");
+    }
+
+    #[test]
+    fn suggestions_come_in_family_order_and_answer_to_the_search() {
+        let mut s = State::relating(View::Ontology, ShapeKind::ActionType, None);
+        let fams: Vec<Family> = s.suggested().iter().map(|(r, _)| r.family()).collect();
+        let mut sorted = fams.clone();
+        sorted.sort_by_key(|f| Family::ALL.iter().position(|g| g == f));
+        assert_eq!(fams, sorted, "grouped: one run per family");
+        s.retype(|f| f.push_str("calls"));
+        assert_eq!(s.suggested(), vec![(RelationKind::Calls, ShapeKind::Function)], "typing a relation's name finds its lines");
+        s.move_by(0);
+        assert_eq!((s.via(), s.picked()), (Some(RelationKind::Calls), Some(ShapeKind::Function)));
+    }
+
+    #[test]
+    fn adding_and_freeform_suggest_nothing() {
+        assert!(State::new(View::Ontology).suggested().is_empty());
+        assert!(State::relating(View::Freeform, ShapeKind::Box, None).suggested().is_empty());
     }
 
     #[test]

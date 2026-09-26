@@ -214,8 +214,15 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
         // corner would leave it hanging outside the curve.
         if !e.kind.is_sketch() && e.h >= 4.0 {
             let size = 11.0 * s;
-            let w = e.tag().chars().count() as f64 * size * 0.55;
-            items.push(Item::Text { x: px(e.x + e.w / 2.0) - w / 2.0, y: py(e.y) + 4.0 * s, text: e.tag(), color: [120, 120, 120], font: None, size, bold: false, italic: false, underline: false, band: None });
+            let tag = e.tag_marked(true);
+            let w = tag.chars().count() as f64 * size * 0.55;
+            let x = px(e.x + e.w / 2.0) - w / 2.0;
+            items.push(Item::Text { x, y: py(e.y) + 4.0 * s, text: e.kind.short().into(), color: [120, 120, 120], font: None, size, bold: false, italic: false, underline: false, band: None });
+            // Paper's mark is a letter, since a sans face may have no ✗ — red all the same.
+            if let Some(m) = e.status.mark(true) {
+                let x = x + (e.kind.short().chars().count() + 1) as f64 * size * 0.55;
+                items.push(Item::Text { x, y: py(e.y) + 4.0 * s, text: m.into(), color: paint_rgb(Paint::Red.into(), !dark), font: None, size, bold: true, italic: false, underline: false, band: None });
+            }
         }
         let t = &e.text;
         let text_ink = t.color.map(|c| c.on(!dark)).unwrap_or(ink);
@@ -227,8 +234,18 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
         if let Some(ry) = e.header_rule() {
             items.push(Item::Polyline { pts: vec![(px(e.x), py(ry)), (px(e.right()), py(ry))], color, width, dash: None });
             let row_size = 12.0 * s;
-            for (x, y, head, ty) in e.row_parts(true) {
-                items.push(Item::Text { x: px(x), y: py(y) + 2.0 * s, text: head, color: ink, font: None, size: row_size, bold: false, italic: false, underline: false, band: None });
+            // The parts run in property order; the overflow row, last, has no property of its
+            // own. A deprecated row's letter is set apart in red, and the name where it stood.
+            let gone = crate::model::Status::Deprecated.mark(true).unwrap_or_default();
+            for (i, (x, y, head, ty)) in e.row_parts(true).into_iter().enumerate() {
+                let (x, head) = match head.strip_prefix(gone).filter(|_| e.properties.get(i).is_some_and(|p| p.mark(true).trim() == gone)) {
+                    Some(rest) => {
+                        items.push(Item::Text { x: px(x), y: py(y) + 2.0 * s, text: gone.into(), color: paint_rgb(Paint::Red.into(), !dark), font: None, size: row_size, bold: true, italic: false, underline: false, band: None });
+                        (px(x) + (gone.chars().count() as f64) * row_size * 0.55, rest.to_string())
+                    }
+                    None => (px(x), head),
+                };
+                items.push(Item::Text { x, y: py(y) + 2.0 * s, text: head, color: ink, font: None, size: row_size, bold: false, italic: false, underline: false, band: None });
                 let tw = ty.chars().count() as f64 * row_size * 0.55;
                 items.push(Item::Text { x: px(e.right() - 2.0) - tw, y: py(y) + 2.0 * s, text: ty, color: [120, 120, 120], font: None, size: row_size, bold: false, italic: false, underline: false, band: None });
             }

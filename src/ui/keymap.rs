@@ -298,7 +298,7 @@ pub static COMMANDS: &[Cmd] = &[
         keys: "h j k l",
         short: "",
         what: |w| match () {
-            _ if w.mode == Mode::Sheet => "j/k the next field; h/l cycle a choice",
+            _ if w.mode == Mode::Sheet => "j/k the next field; h/l cycle a choice or step a number",
             _ if w.mode == Mode::Text => "drag the label a cell that way — anywhere, outside the shape too (a count: further)",
             _ if w.mode == Mode::View => "pan the view that way (a count: further)",
             _ if w.mode == Mode::Reshape && w.held => "drag the handle a cell that way",
@@ -699,6 +699,7 @@ pub static COMMANDS: &[Cmd] = &[
             Mode::Visual => "move the picked elements a cell (a count: that many)",
             Mode::Text => "drag the label four cells that way",
             Mode::View => "pan the view half a screen that way",
+            Mode::Sheet => "H/L step a number ten at a time, stopping at its limit (a choice: as h/l)",
             _ if w.on.is_some_and(|s| s.composite) => "move this box and everything inside it",
             _ => "move this element a cell (a count: that many)",
         },
@@ -708,7 +709,7 @@ pub static COMMANDS: &[Cmd] = &[
         avail: |w| match w.mode {
             Mode::Visual => need(w.picked > 0, "nothing picked yet — space"),
             Mode::Reshape => need(w.held, "take hold of a handle first — enter"),
-            Mode::Text | Mode::View => Avail::Yes,
+            Mode::Text | Mode::View | Mode::Sheet => Avail::Yes,
             _ => need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         },
         run: &[],

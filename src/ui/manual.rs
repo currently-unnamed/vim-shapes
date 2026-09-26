@@ -303,7 +303,7 @@ fn build_pages() -> Vec<Page> {
              |relations|    drawing a line that means something\n\
              |editing|      labels, moving, sizing, undo, picking\n\
              |layers|       the ontology: the kinds of shapes, by layer\n\
-             |relation-kinds| the eleven ways two elements join\n\
+             |relation-kinds| the ways two elements join, by family\n\
              |views|        what sort of diagram this is\n\
              |tabs|         several diagrams in one file\n\
              |stack|        layers: show, hide, lock, and the drawing order\n\
@@ -398,9 +398,12 @@ fn build_pages() -> Vec<Page> {
              \n\
              Dropping opens the PICKER: every relation kind, the ones the rules allow\n\
              between these two elements first and lit, the rest dimmed with the reason.\n\
-             The first lit row is the most specific line the rules permit, so enter\n\
-             twice draws the best line. A dimmed row can still be chosen: the relation\n\
-             is drawn, marked ⚠, and listed by :lint.\n\
+             Both halves are grouped by family — structural, dependency, dynamic,\n\
+             ontology schema, action rules, other — so from an object type the schema\n\
+             is on top and the architecture's families sit together below. The first\n\
+             lit row is the most specific line the rules permit, so enter twice draws\n\
+             the best line. A dimmed row can still be chosen: the relation is drawn,\n\
+             marked ⚠, and listed by :lint. See |relation-kinds|.\n\
              \n\
              # a shape and its relation, in one move\n\
              \n\
@@ -414,6 +417,15 @@ fn build_pages() -> Vec<Page> {
              architecture tab the picker asks which kind of relation, and then you are\n\
              typing the new shape's label. On a freeform tab there is no picker: the\n\
              two are joined by a plain |link|, and you type the label at once.\n\
+             \n\
+             On an architecture tab the palette opens with SUGGESTED LINES on top: a\n\
+             relation and a kind together — implements → Interface, calls → Function —\n\
+             grouped by family. A relation is suggested when it can reach only a few\n\
+             kinds from here, because that is what makes it say something; one that\n\
+             reaches a dozen (serving, triggering) is still there, through the kinds\n\
+             below and the picker. Enter on a suggested line draws it outright, no\n\
+             picker. Every kind of shape is still listed underneath, and typing\n\
+             searches both — a relation's name finds its lines.\n\
              \n\
              # the three nodes of a link\n\
              \n\
@@ -491,7 +503,9 @@ fn build_pages() -> Vec<Page> {
              \n\
              >  j/k          the next field       tab / shift-tab    the next tab\n\
              >  i            type into the field (esc or enter leaves it)\n\
-             >  h/l          cycle a choice       t                  the label\n\
+             >  h/l          cycle a choice, or step a number by one\n\
+             >  H/L          step a number by ten, stopping at its limit\n\
+             >  t            the label\n\
              >  enter        run an action, or step into the field\n\
              >  esc          keyboard back to the diagram     q     close\n\
              \n\
@@ -781,9 +795,13 @@ fn build_pages() -> Vec<Page> {
     }
 
     // relation kinds
-    let mut t = String::from("*relation-kinds*  the eleven ways two elements join\n\n");
-    for r in RelationKind::ALL {
-        let _ = writeln!(t, "|{:<15}| {:<20} {}", r.name(), r.verb(), r.tagline());
+    let mut t = String::from("*relation-kinds*  the ways two elements join, family by family\n\n");
+    for f in ontology::Family::ALL {
+        let _ = writeln!(t, "# {} — {}\n", f.name(), f.tagline());
+        for r in RelationKind::ALL.into_iter().filter(|r| r.family() == f) {
+            let _ = writeln!(t, "|{:<15}| {:<20} {}", r.name(), r.verb(), r.tagline());
+        }
+        t.push('\n');
     }
     t.push_str("\nEach one's page lists which kinds it may join. The rules are advisory: a\n\
                 refused relation is drawn and marked, and :lint lists it. See |rules|.\n");
@@ -920,7 +938,7 @@ fn build_pages() -> Vec<Page> {
          \n\
          An object type is its properties: a box with a header and a compartment of rows —\n\
          a mark, the name, the base type. ⚿ the primary key, ✎ the title, ✱ shared, [] an\n\
-         array, ‹Email› a value type, * a required parameter, † deprecated. P (or :props)\n\
+         array, ‹Email› a value type, * a required parameter, a red ✗ deprecated. P (or :props)\n\
          on an object type, an interface or an action type opens the PROPERTY BROWSER,\n\
          docked above the sheet; the box grows to hold its rows.\n\
          \n\
@@ -936,7 +954,7 @@ fn build_pages() -> Vec<Page> {
          >  esc          back to the diagram\n\
          \n\
          The sheet adds API NAME, PLURAL, STATUS (experimental draws dashed; deprecated fades\n\
-         and wears a †) and VISIBILITY.\n\
+         and wears a red ✗ — an x on paper) and VISIBILITY.\n\
          \n\
          # documentation\n\
          \n\

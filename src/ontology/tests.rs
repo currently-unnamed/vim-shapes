@@ -328,3 +328,23 @@ fn the_check_report_names_what_is_wrong() {
     let started = emit::report(&idiom::build(&idiom::IDIOMS[0]));
     assert!(started.contains("ontology: Airport has no properties"), "{started}");
 }
+
+#[test]
+fn the_relations_run_family_by_family_with_the_catch_alls_last() {
+    // The picker and the palette put a heading wherever the family changes, so a family
+    // split across ALL would be headed twice — and its halves read as two families.
+    let order: Vec<usize> = RelationKind::ALL.iter().map(|r| Family::ALL.iter().position(|f| *f == r.family()).unwrap()).collect();
+    assert!(order.windows(2).all(|w| w[0] <= w[1]), "ALL is out of family order: {order:?}");
+    assert_eq!(RelationKind::ALL[RelationKind::ALL.len() - 2..], [Association, Link], "the two that say least, last");
+}
+
+#[test]
+fn an_ontology_shape_suggests_its_schema_and_not_what_fans_out() {
+    let s = suggestions(ObjectType, View::Ontology);
+    assert!(s.contains(&(Implements, Interface)) && s.contains(&(BackedBy, Datasource)) && s.contains(&(LinkType, ObjectType)));
+    assert!(s.iter().all(|(r, k)| r.is_specific() && allowed(*r, ObjectType, *k).is_ok()), "only allowed, specific lines");
+    // A function serves any behaviour of two layers: allowed, offered below, but not a suggestion.
+    assert!(allowed(Serving, Function, BusinessProcess).is_ok());
+    assert!(suggestions(Function, View::Ontology).is_empty());
+    assert!(suggestions(Grouping, View::Free).iter().all(|(r, _)| *r != Aggregation), "a composite aggregates anything");
+}

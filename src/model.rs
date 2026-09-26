@@ -279,7 +279,7 @@ impl Property {
             (false, true, ..) => "⚿ ",
             (false, _, true, ..) => "✎ ",
             (false, _, _, true, _) => "✱ ",
-            (false, .., Status::Deprecated) => "† ",
+            (false, .., Status::Deprecated) => "✗ ",
             (true, true, ..) => "PK ",
             (true, _, true, ..) => "T  ",
             (true, _, _, true, _) => "S  ",
@@ -456,6 +456,16 @@ impl Status {
         let want = s.trim().to_ascii_lowercase();
         Status::ALL.into_iter().find(|v| !want.is_empty() && v.name().starts_with(&want))
     }
+
+    /// The mark a deprecated type or property wears: ✗ on the screen, x on paper, where a
+    /// sans face may have no ✗. Every picture draws it in red — a dagger in the tag's grey
+    /// read as a cross, or as a footnote, and was missed. `None` for anything still in use.
+    pub fn mark(self, plain: bool) -> Option<&'static str> {
+        match self {
+            Status::Deprecated => Some(if plain { "x" } else { "✗" }),
+            _ => None,
+        }
+    }
 }
 
 /// How prominently a type is shown.
@@ -591,9 +601,18 @@ impl Element {
         if self.status == Status::Deprecated { self.opacity.min(50) } else { self.opacity }
     }
 
-    /// The kind's tag as the box prints it: a dagger on a deprecated type.
+    /// The kind's tag as the box prints it: `object ✗` on a deprecated type, the mark last
+    /// so a picture can find it and draw it red.
     pub fn tag(&self) -> String {
-        if self.status == Status::Deprecated { format!("{} †", self.kind.short()) } else { self.kind.short().to_string() }
+        self.tag_marked(false)
+    }
+
+    /// The same, with a letter for the mark where the face may not have the symbol.
+    pub fn tag_marked(&self, plain: bool) -> String {
+        match self.status.mark(plain) {
+            Some(m) => format!("{} {m}", self.kind.short()),
+            None => self.kind.short().to_string(),
+        }
     }
 }
 
