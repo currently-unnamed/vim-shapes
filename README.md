@@ -214,3 +214,7 @@ Unsaved work is a **comparison** against what was last saved, not a flag: undo b
 - The in-app manual (`:help`) is the source of truth for anything this README skims.
 - Diagrams are plain JSON (`:w`), so a surprising one is easy to attach to a bug report; `vim-shapes --check` on it says what the tool thinks.
 - `cargo test` should pass on a clean checkout with zero warnings from `cargo build`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

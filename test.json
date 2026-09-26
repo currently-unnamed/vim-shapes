@@ -1,0 +1,53 @@
+{
+  "version": 3,
+  "current": 0,
+  "tabs": [
+    {
+      "name": "test",
+      "diagram": {
+        "version": 2,
+        "metadata": {
+          "view": "free",
+          "page": {
+            "grid": false,
+            "grid_color": "#13ecec"
+          }
+        },
+        "elements": [
+          {
+            "id": 0,
+            "kind": "driver",
+            "label": "",
+            "x": 2.0,
+            "y": 2.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 1,
+            "kind": "stakeholder",
+            "label": "hh",
+            "x": 32.0,
+            "y": 2.0,
+            "w": 16.0,
+            "h": 5.0,
+            "color": "red",
+            "stroke": 3
+          }
+        ],
+        "relations": [
+          {
+            "id": 0,
+            "kind": "link",
+            "from": 0,
+            "to": 1,
+            "from_port": 3,
+            "to_port": 7
+          }
+        ],
+        "next_element_id": 2,
+        "next_relation_id": 1
+      }
+    }
+  ]
+}
