@@ -5,14 +5,20 @@
 //! takes the fill colour architects already read it in, and each relation takes the line and
 //! arrowheads of its notation. Cells are ten pixels wide and twenty tall, which is roughly the
 //! aspect of a terminal cell, so the picture keeps its proportions.
+//!
+//! Every cell also carries a `vsKind` attribute naming its exact `ShapeKind`/`RelationKind` —
+//! drawio ignores attributes it does not know, so this costs nothing to a real diagrams.net
+//! file, but it is what lets `drawio_import` bring a round-tripped file back as the kind it
+//! left as, rather than only the shape it happens to be drawn as (many kinds share a shape).
 
 use std::path::Path;
 
 use crate::model::{Document, Element, Relation};
 use crate::ontology::{End, Layer, LineStyle, Shape, ShapeKind};
 
-const CELL_W: f64 = 10.0;
-const CELL_H: f64 = 20.0;
+// Shared with `drawio_import`, so a round trip cannot drift: the two are one scale, not two.
+pub(crate) const CELL_W: f64 = 10.0;
+pub(crate) const CELL_H: f64 = 20.0;
 
 pub fn export(doc: &Document, path: &Path) -> std::io::Result<()> {
     std::fs::write(path, to_xml(doc))
@@ -153,8 +159,10 @@ fn element_cell(e: &Element, looks: &str) -> String {
             if e.drawn_opacity() < 100 { format!("opacity={};", e.drawn_opacity()) } else { String::new() }
         );
         let mut s = format!(
-            "        <mxCell id=\"e{}\" value=\"{}\" style=\"swimlane;fontStyle=1;childLayout=stackLayout;horizontal=1;startSize={};horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;whiteSpace=wrap;html=1;fillColor={};strokeColor={};{}{}\" vertex=\"1\" parent=\"1\">\n          <mxGeometry x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" as=\"geometry\"/>\n        </mxCell>\n",
+            "        <mxCell id=\"e{}\" vsKind=\"{}\" vsLabel=\"{}\" value=\"{}\" style=\"swimlane;fontStyle=1;childLayout=stackLayout;horizontal=1;startSize={};horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;whiteSpace=wrap;html=1;fillColor={};strokeColor={};{}{}\" vertex=\"1\" parent=\"1\">\n          <mxGeometry x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" as=\"geometry\"/>\n        </mxCell>\n",
             e.id,
+            e.kind.slug(),
+            escape(&e.label),
             head,
             CELL_H * crate::model::Element::HEADER,
             fill,
@@ -182,8 +190,10 @@ fn element_cell(e: &Element, looks: &str) -> String {
         return s;
     }
     format!(
-        "        <mxCell id=\"e{}\" value=\"{}\" style=\"{}\" vertex=\"1\" parent=\"1\">\n          <mxGeometry x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" as=\"geometry\"/>\n        </mxCell>\n",
+        "        <mxCell id=\"e{}\" vsKind=\"{}\" vsLabel=\"{}\" value=\"{}\" style=\"{}\" vertex=\"1\" parent=\"1\">\n          <mxGeometry x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" as=\"geometry\"/>\n        </mxCell>\n",
         e.id,
+        e.kind.slug(),
+        escape(&e.label),
         escape(&value),
         style,
         e.x * CELL_W,
@@ -272,8 +282,9 @@ fn relation_cell(doc: &Document, r: &Relation, sketch: bool) -> String {
         _ => String::new(),
     };
     format!(
-        "        <mxCell id=\"r{}\" value=\"{}\" style=\"{}\" edge=\"1\" parent=\"1\" source=\"e{}\" target=\"e{}\">\n          <mxGeometry relative=\"1\" as=\"geometry\">{}</mxGeometry>\n        </mxCell>\n",
+        "        <mxCell id=\"r{}\" vsKind=\"{}\" value=\"{}\" style=\"{}\" edge=\"1\" parent=\"1\" source=\"e{}\" target=\"e{}\">\n          <mxGeometry relative=\"1\" as=\"geometry\">{}</mxGeometry>\n        </mxCell>\n",
         r.id,
+        r.kind.name(),
         escape(r.label.as_deref().unwrap_or("")),
         style,
         r.from,

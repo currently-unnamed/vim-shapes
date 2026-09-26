@@ -1,6 +1,8 @@
+mod archimate_import;
 mod clean;
 mod config;
 mod drawio_export;
+mod drawio_import;
 mod export;
 mod fonts;
 mod layout;

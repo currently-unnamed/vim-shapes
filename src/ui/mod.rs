@@ -26,6 +26,7 @@ pub mod splash;
 pub mod start;
 pub mod tabpick;
 pub mod theme;
+pub mod tree;
 pub mod wildmenu;
 pub mod wire;
 
@@ -43,6 +44,17 @@ use crate::persistence;
 /// A tab's name as a scratch file's stem.
 fn exportdlg_slug(name: &str) -> String {
     name.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect()
+}
+
+/// Which of the two `:import` formats a file is, by its content rather than its name — a
+/// draw.io file's root is always `<mxfile`, and a peek at the first few KB is enough to see
+/// it without reading a large ArchiMate model twice over.
+fn sniff_is_drawio(path: &std::path::Path) -> Result<bool, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("could not read file: {e}"))?;
+    let mut buf = [0u8; 4096];
+    let n = f.read(&mut buf).map_err(|e| format!("could not read file: {e}"))?;
+    Ok(String::from_utf8_lossy(&buf[..n]).contains("<mxfile"))
 }
 use canvas::Target;
 use keymap::{Avail, Focus, Mode, Prefix, Resolved, Spot, Where};
@@ -66,6 +78,7 @@ enum Pending {
     Quit,
     New,
     Open(PathBuf),
+    Import(PathBuf),
 }
 
 impl Pending {
@@ -74,6 +87,7 @@ impl Pending {
             Pending::Quit => "quit",
             Pending::New => "start a new diagram",
             Pending::Open(_) => "open another",
+            Pending::Import(_) => "import a draw.io file",
         }
     }
 }
@@ -184,6 +198,11 @@ pub struct App {
     tabpick: Option<tabpick::State>,
     sheet: Option<sheet::State>,
     layers: Option<layers::State>,
+    /// The model tree — the folder organization a coArchi import came from, if the workspace
+    /// is one; empty otherwise. Never saved: `load_workspace` clears it, since a file this app
+    /// wrote back out has no folders of its own to remember.
+    model_tree: Vec<crate::archimate_import::ModelNode>,
+    tree: Option<tree::State>,
     /// The property browser, on an ontology type's rows, while one is up.
     props: Option<props::State>,
     /// The colour picker, over the sheet, while one is up.
@@ -259,6 +278,8 @@ impl App {
             tabpick: None,
             sheet: None,
             layers: None,
+            model_tree: Vec::new(),
+            tree: None,
             props: None,
             colour: None,
             recent_colours: Vec::new(),
@@ -304,6 +325,10 @@ impl App {
 
     /// Replace everything with a workspace — what opening a file and `:new` both do.
     fn load_workspace(&mut self, ws: Workspace) {
+        // A model tree only means anything for the coArchi import that just made it — the
+        // caller sets `model_tree` again immediately after, if this workspace is one.
+        self.model_tree = Vec::new();
+        self.tree = None;
         self.tabs = ws
             .tabs
             .into_iter()
@@ -396,6 +421,37 @@ impl App {
         self.saved = self.serialized();
         self.path = Some(path.clone());
         self.say(format!("opened {}", path.display()), Tone::Good);
+        Ok(())
+    }
+
+    /// Import a draw.io file, an ArchiMate exchange file, or a coArchi model folder, replacing
+    /// whatever is here. The caller has already decided that is fine. A directory is coArchi;
+    /// otherwise the two file formats are told apart by content, not extension — a draw.io
+    /// file's root is always `<mxfile`, and that is the only thing checked; anything else is
+    /// handed to the ArchiMate reader, which refuses outright if it isn't one either. Unlike
+    /// `open_path`, this never sets `self.path` — none of the three is what `:w` would save
+    /// back to, so a bare `:w` afterward asks for a name rather than silently writing JSON
+    /// over whatever was just read.
+    pub fn import_path(&mut self, path: PathBuf) -> Result<(), String> {
+        let (ws, tree) = if path.is_dir() {
+            let (ws, tree) = crate::archimate_import::import_coarchi(&path).map_err(|e| e.to_string())?;
+            persistence::validate_workspace(&ws).map_err(|why| format!("{}: {why}", path.display()))?;
+            (ws, tree)
+        } else if sniff_is_drawio(&path)? {
+            let doc = crate::drawio_import::import(&path).map_err(|e| e.to_string())?;
+            persistence::validate(&doc).map_err(|why| format!("{}: {why}", path.display()))?;
+            let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "diagram 1".into());
+            (Workspace::single(name, doc), Vec::new())
+        } else {
+            let ws = crate::archimate_import::import(&path).map_err(|e| e.to_string())?;
+            persistence::validate_workspace(&ws).map_err(|why| format!("{}: {why}", path.display()))?;
+            (ws, Vec::new())
+        };
+        self.load_workspace(ws);
+        self.model_tree = tree;
+        self.saved = self.serialized();
+        self.path = None;
+        self.say(format!("imported {}", path.display()), Tone::Good);
         Ok(())
     }
 
@@ -1595,6 +1651,10 @@ impl App {
             self.layers_key(k);
             return;
         }
+        if self.tree.is_some() {
+            self.tree_key(k);
+            return;
+        }
         if self.props.is_some() {
             self.props_key(k);
             return;
@@ -2215,6 +2275,57 @@ impl App {
         }
     }
 
+    /// The model tree's keys — arrows move and fold/unfold, like the add palette, so every
+    /// letter can go to the search instead.
+    fn tree_key(&mut self, k: KeyEvent) {
+        let Some(st) = &mut self.tree else { return };
+        match k.code {
+            KeyCode::Esc => self.tree = None,
+            KeyCode::Char(':') => {
+                self.tree = None;
+                self.cmdline = Some(cmdline::State::new(':'));
+            }
+            KeyCode::Down => st.move_by(1, &tree::rows(&self.model_tree, &st.filter)),
+            KeyCode::Up => st.move_by(-1, &tree::rows(&self.model_tree, &st.filter)),
+            KeyCode::Backspace => st.retype(|f| {
+                f.pop();
+            }),
+            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => st.retype(|f| f.push(c)),
+            KeyCode::Right => {
+                let rows = tree::rows(&self.model_tree, &st.filter);
+                if let Some(path) = rows.get(st.sel).map(|r| r.path.clone()) {
+                    tree::expand(&mut self.model_tree, &path);
+                }
+            }
+            KeyCode::Left => {
+                let rows = tree::rows(&self.model_tree, &st.filter);
+                if let Some(path) = rows.get(st.sel).map(|r| r.path.clone()) {
+                    tree::collapse(&mut self.model_tree, &path);
+                }
+            }
+            KeyCode::Enter => {
+                let rows = tree::rows(&self.model_tree, &st.filter);
+                let Some(row) = rows.get(st.sel).cloned() else { return };
+                match row.kind {
+                    tree::RowKind::Folder { .. } => tree::toggle(&mut self.model_tree, &row.path),
+                    tree::RowKind::View { tab_index } => self.jump_to_tab(tab_index, &row.label),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A tree row's tab, by the index the import gave it, falling back to a search by name if
+    /// tabs have since been closed or reordered and the index no longer lines up.
+    fn jump_to_tab(&mut self, tab_index: usize, name: &str) {
+        let target = if self.tabs.get(tab_index).is_some_and(|t| t.name == name) { Some(tab_index) } else { self.tabs.iter().position(|t| t.name == name) };
+        self.tree = None;
+        match target {
+            Some(i) => self.switch_tab(i),
+            None => self.say(format!("{name:?} isn't open anymore"), Tone::Bad),
+        }
+    }
+
     /// The sheet's keys. Stepped into a field, the letters are the value; out of one, they
     /// are the sheet's own commands.
     fn sheet_key(&mut self, k: KeyEvent) {
@@ -2413,6 +2524,11 @@ impl App {
             Pending::New => self.new_document(),
             Pending::Open(path) => {
                 if let Err(e) = self.open_path(path) {
+                    self.say(e, Tone::Bad);
+                }
+            }
+            Pending::Import(path) => {
+                if let Err(e) = self.import_path(path) {
                     self.say(e, Tone::Bad);
                 }
             }
@@ -2684,6 +2800,18 @@ impl App {
                     self.say(e, Tone::Bad);
                 }
             }
+            excmd::Op::Import => {
+                if arg.is_empty() {
+                    self.say("usage: :import <file.drawio>", Tone::Bad);
+                    return;
+                }
+                let path = PathBuf::from(arg);
+                if self.dirty() && !bang {
+                    self.confirm = Some(Confirm::Discard(Pending::Import(path)));
+                } else if let Err(e) = self.import_path(path) {
+                    self.say(e, Tone::Bad);
+                }
+            }
             excmd::Op::Add => {
                 if arg.is_empty() {
                     self.palette = Some(palette::State::new(self.doc.metadata.view));
@@ -2861,6 +2989,16 @@ impl App {
                     Some(_) => None,
                     None => Some(layers::State::new(&self.doc)),
                 };
+            }
+            excmd::Op::Tree => {
+                if self.model_tree.is_empty() {
+                    self.say("no model tree — :import a coArchi model folder first", Tone::Bad);
+                } else {
+                    self.tree = match self.tree.take() {
+                        Some(_) => None,
+                        None => Some(tree::State::new()),
+                    };
+                }
             }
             excmd::Op::Sheet => {
                 self.sheet = match self.sheet.take() {
@@ -3094,6 +3232,10 @@ impl App {
             let area = chrome::centered(body, tabpick::WIDTH, tabpick::HEIGHT);
             f.render_widget(tabpick::Picker { state: p }, area);
         }
+        if let Some(st) = &self.tree {
+            let area = chrome::centered(body, tree::WIDTH.max(48), tree::height(body.height));
+            f.render_widget(tree::Browser { state: st, nodes: &self.model_tree }, area);
+        }
         let layers_h = self.layers.as_ref().map_or(0, |_| (self.doc.layers.len() as u16 + 6).min(full.height));
         let props_h = self.props.as_ref().map_or(0, |p| props::height(self.doc.element(p.target).map_or(0, |e| e.properties.len()), full.height.saturating_sub(layers_h)));
         let browser_h = layers_h + props_h;
@@ -3199,6 +3341,7 @@ impl App {
             (self.relpick.is_some(), "relpick"),
             (self.sheet.is_some(), "sheet"),
             (self.layers.is_some(), "layers"),
+            (self.tree.is_some(), "tree"),
             (self.props.is_some(), "props"),
             (self.help.is_some(), "help"),
             (self.manual.is_some(), "manual"),
@@ -3695,6 +3838,110 @@ mod tests {
         std::fs::remove_file(&path).ok();
         assert_eq!(b.doc, a.doc);
         assert!(b.cursor.is_some());
+    }
+
+    #[test]
+    fn import_reads_a_draw_io_file_back_and_asks_first_if_there_is_unsaved_work() {
+        let mut a = app();
+        two(&mut a);
+        a.doc.connect(RelationKind::Realization, a.doc.elements[0].id, a.doc.elements[1].id).unwrap();
+        let mut path = std::env::temp_dir();
+        path.push(format!("vim-shapes-import-{}.drawio", std::process::id()));
+        std::fs::write(&path, crate::drawio_export::to_xml(&a.doc)).unwrap();
+
+        let mut b = app();
+        two(&mut b);
+        assert!(b.dirty());
+        b.run_excmd(format!("import {}", path.display()));
+        assert!(matches!(b.confirm, Some(Confirm::Discard(Pending::Import(_)))), "unsaved work is asked about first");
+        press(&mut b, "y");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(b.doc.elements.len(), 2);
+        assert_eq!(b.doc.elements[0].kind, ApplicationComponent);
+        assert_eq!(b.doc.relations[0].kind, RelationKind::Realization, "the exact kind, from the file's own hint");
+        assert!(b.path.is_none(), "a draw.io file is not what :w would save back to");
+        assert!(matches!(b.status, Some((ref m, Tone::Good)) if m.starts_with("imported")));
+    }
+
+    #[test]
+    fn import_also_reads_an_archimate_exchange_file_by_its_content_not_its_extension() {
+        const ARCHIMATE: &str = r#"<model xmlns="http://www.opengroup.org/xsd/archimate/3.0/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" identifier="id-m">
+  <name>From Archi</name>
+  <elements>
+    <element identifier="id-1" xsi:type="ApplicationComponent"><name>CRM</name></element>
+    <element identifier="id-2" xsi:type="ApplicationService"><name>Contacts</name></element>
+  </elements>
+  <relationships>
+    <relationship identifier="id-3" xsi:type="Realization" source="id-1" target="id-2" />
+  </relationships>
+</model>"#;
+        let mut path = std::env::temp_dir();
+        // A ".xml" extension on purpose: the format is told apart by its content, not the name.
+        path.push(format!("vim-shapes-archimate-import-{}.xml", std::process::id()));
+        std::fs::write(&path, ARCHIMATE).unwrap();
+        let mut a = app();
+        a.run_excmd(format!("import {}", path.display()));
+        std::fs::remove_file(&path).ok();
+        assert_eq!(a.tab_name(), "From Archi");
+        assert_eq!(a.doc.elements.len(), 2);
+        assert_eq!(a.doc.elements[0].kind, ApplicationComponent);
+        assert_eq!(a.doc.relations[0].kind, RelationKind::Realization);
+    }
+
+    #[test]
+    fn the_model_tree_browses_a_coarchi_import_and_enter_jumps_to_a_view() {
+        let mut root = std::env::temp_dir();
+        root.push(format!("vim-shapes-tree-{}", std::process::id()));
+        let model = root.join("model");
+        std::fs::create_dir_all(model.join("application")).unwrap();
+        std::fs::create_dir_all(model.join("diagrams/sub")).unwrap();
+        std::fs::write(model.join("folder.xml"), r#"<archimate:ArchimateModel xmlns:archimate="http://www.archimatetool.com/archimate" name="Fixture" id="m1"/>"#).unwrap();
+        std::fs::write(model.join("application/ApplicationComponent_a1.xml"), r#"<archimate:ApplicationComponent xmlns:archimate="http://www.archimatetool.com/archimate" name="CRM" id="a1"/>"#).unwrap();
+        std::fs::write(model.join("application/ApplicationService_a2.xml"), r#"<archimate:ApplicationService xmlns:archimate="http://www.archimatetool.com/archimate" name="Contacts" id="a2"/>"#).unwrap();
+        std::fs::write(model.join("diagrams/folder.xml"), r#"<archimate:Folder xmlns:archimate="http://www.archimatetool.com/archimate" name="Views" id="fv"/>"#).unwrap();
+        std::fs::write(
+            model.join("diagrams/ArchimateDiagramModel_v1.xml"),
+            r#"<archimate:ArchimateDiagramModel xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:archimate="http://www.archimatetool.com/archimate" name="Billing Overview" id="v1">
+  <children xsi:type="archimate:DiagramModelArchimateObject" id="n1">
+    <bounds x="10" y="10" width="120" height="55"/>
+    <archimateElement xsi:type="archimate:ApplicationComponent" href="ApplicationComponent_a1.xml#a1"/>
+  </children>
+</archimate:ArchimateDiagramModel>"#,
+        )
+        .unwrap();
+        std::fs::write(model.join("diagrams/sub/folder.xml"), r#"<archimate:Folder xmlns:archimate="http://www.archimatetool.com/archimate" name="Nested" id="fn"/>"#).unwrap();
+        std::fs::write(
+            model.join("diagrams/sub/ArchimateDiagramModel_v2.xml"),
+            r#"<archimate:ArchimateDiagramModel xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:archimate="http://www.archimatetool.com/archimate" name="Detail View" id="v2">
+  <children xsi:type="archimate:DiagramModelArchimateObject" id="n2">
+    <bounds x="10" y="10" width="120" height="55"/>
+    <archimateElement xsi:type="archimate:ApplicationService" href="ApplicationService_a2.xml#a2"/>
+  </children>
+</archimate:ArchimateDiagramModel>"#,
+        )
+        .unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("import {}", root.display()));
+        std::fs::remove_dir_all(&root).ok();
+        assert!(!a.model_tree.is_empty(), "the coArchi import kept its folder tree");
+
+        a.run_excmd("tree".into());
+        assert!(a.tree.is_some());
+        // Folded: only the top folder shows.
+        assert_eq!(tree::rows(&a.model_tree, "").len(), 1);
+        key(&mut a, KeyCode::Right);
+        // Open: its view and its own nested (still folded) folder show too.
+        let opened = tree::rows(&a.model_tree, "");
+        assert_eq!(opened.len(), 3);
+        assert_eq!(opened[1].label, "Billing Overview");
+        key(&mut a, KeyCode::Down);
+        key(&mut a, KeyCode::Enter);
+
+        assert!(a.tree.is_none(), "picking a view closes the tree");
+        assert_eq!(a.tab_name(), "Billing Overview");
+        assert_eq!(a.doc.elements[0].label, "CRM");
     }
 
     #[test]

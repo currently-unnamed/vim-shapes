@@ -63,12 +63,14 @@ impl Section {
             Section::Tab => &[
                 "each tab is a diagram of its own — FREEFORM (plain shapes, a whiteboard)",
                 "or ARCHITECTURE (the ontology, narrowed by :kind). The file holds them",
-                "all. :tabnew, :tabrename <name>, :tabclose, :tab N, :tabs.",
+                "all. :tabnew, :tabrename <name>, :tabclose, :tab N, :tabs. Hundreds of",
+                "tabs, from a coArchi import? :tree folds and searches its own folders.",
             ],
             Section::File => &[
                 ":w [path] saves, :o <path> opens, :n starts fresh, :q quits (asks if",
                 "there is unsaved work; :q! does not), :export <path.drawio> writes a",
-                "draw.io file. ZZ and ZQ are the vim chords for :wq and :q!.",
+                "draw.io file, :import <path> reads one back, an ArchiMate exchange",
+                "file, or a coArchi folder. ZZ and ZQ are the vim chords for :wq, :q!.",
             ],
             _ => &[],
         }

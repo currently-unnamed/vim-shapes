@@ -653,6 +653,9 @@ fn build_pages() -> Vec<Page> {
              >  :tabs                 list them\n\
              >  :tabclose             close this tab; asks if its diagram is unsaved\n\
              \n\
+             A workspace with hundreds of tabs — what a large coArchi import turns into — is\n\
+             not something gt or a remembered number reaches. See |tree|.\n\
+             \n\
              # the grid\n\
              \n\
              Faint dots mark the canvas so an empty diagram still reads as a surface with a\n\
@@ -708,6 +711,7 @@ fn build_pages() -> Vec<Page> {
              \n\
              >  :w [path]         save — to the file opened, or the path given\n\
              >  :o <path>         open\n\
+             >  :import <path>    a draw.io file, an ArchiMate exchange file, or a coArchi folder\n\
              >  :n                start an empty diagram\n\
              >  :q                quit; asks if there is unsaved work. :q! does not\n\
              >  ZZ  ZQ            :wq and :q!, as vim chords\n\
@@ -720,11 +724,59 @@ fn build_pages() -> Vec<Page> {
              that names an element that is not there is refused whole rather than opened\n\
              half-broken.\n\
              \n\
+             :import reads three other things back, replacing this diagram — a directory\n\
+             means coArchi, otherwise the two file formats are told apart by content, not\n\
+             extension. All three are generous, not exact.\n\
+             \n\
+             A draw.io file — one this app exported, or one from the desktop tool itself.\n\
+             A cell this app wrote comes back as the exact kind it left as; a shape from a\n\
+             genuine diagrams.net file is guessed at from its own stencil, and an unrecognized\n\
+             one becomes a plain box. Neither a shape's paint nor a relation's line weight\n\
+             survives the trip — only its kind, its label and its box.\n\
+             \n\
+             An ArchiMate model exchange file — what Archi writes with File > Export > Model\n\
+             to Open Exchange Format — or a coArchi model repository, the same model kept as\n\
+             a folder of small files under git instead (point :import at the repository or\n\
+             its model folder either way). Either format's own element and relation names\n\
+             mostly line up with this ontology's — a BusinessActor comes back as one — and\n\
+             what doesn't (a newer ArchiMate 3.x type, a junction, Contract, Representation,\n\
+             and a few others this ontology has no counterpart for) becomes a plain box\n\
+             carrying its ArchiMate type in its label, so nothing is silently dropped. Views\n\
+             become one tab each, placed where the file said; whatever was never put on a\n\
+             view — and everything, if there are no views at all — lands on its own tab,\n\
+             arranged by layer. A coArchi import also keeps the repository's own folders —\n\
+             see |tree| for browsing hundreds of them.\n\
+             \n\
+             Either way, run :lint afterward to see what the rules make of what came in.\n\
+             \n\
              Unsaved work is a COMPARISON against what was last saved, not a flag: undo\n\
              back to the saved state and the diagram is clean again.\n\
              \n\
              >  vim-shapes --check <file>    lint a file and exit\n\
              >  vim-shapes --ontology        the whole ontology, as JSON\n"
+                .to_string(),
+        ),
+        page(
+            "tree",
+            "*tree*  browsing a coArchi import's own folders\n\
+             \n\
+             A coArchi model repository organizes its views into folders — Business,\n\
+             Application, whatever the modeller made underneath. A large one imports into\n\
+             hundreds of tabs, and neither the header nor gt / :tab N is a way to find one\n\
+             of them: :tree is. It folds and searches the same folders the repository had,\n\
+             and opens on a folder only if a view is somewhere under it — one holding\n\
+             nothing but elements never diagrammed has nowhere to send you, so it does not\n\
+             appear at all.\n\
+             \n\
+             >  type          search — every folder and view along a matching path, unfolded\n\
+             >  ↑ / ↓         move the selection\n\
+             >  enter  →      open a folder; on a view, jump to its tab and close\n\
+             >  ←             fold a folder\n\
+             >  esc           close, keeping the tab you were already on\n\
+             \n\
+             The tree is not saved — it is a memory of how the file just read in was laid\n\
+             out, not part of the diagram itself, so it is there only until the next :open,\n\
+             :new, or import of something else.\n"
                 .to_string(),
         ),
     ];

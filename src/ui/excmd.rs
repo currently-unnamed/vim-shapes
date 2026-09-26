@@ -14,6 +14,7 @@ pub enum Op {
     Write,
     Wq,
     Open,
+    Import,
     New,
     Quit,
     Add,
@@ -36,6 +37,7 @@ pub enum Op {
     Debug,
     Sheet,
     Layers,
+    Tree,
     Props,
     Diagram,
 }
@@ -71,6 +73,7 @@ pub static COMMANDS: &[ExCmd] = &[
     ExCmd { name: "write", aliases: &["w"], op: Op::Write, arg: Arg::Path, what: "save — to the file opened, or to the path given" },
     ExCmd { name: "wq", aliases: &["x"], op: Op::Wq, arg: Arg::Path, what: "save and quit" },
     ExCmd { name: "open", aliases: &["o", "e", "edit"], op: Op::Open, arg: Arg::Path, what: "open a diagram file" },
+    ExCmd { name: "import", aliases: &[], op: Op::Import, arg: Arg::Path, what: "import a draw.io file, an ArchiMate exchange file, or a coArchi model folder — best-effort, never refused for an unrecognized shape" },
     ExCmd { name: "new", aliases: &["n"], op: Op::New, arg: Arg::None, what: "start an empty diagram" },
     ExCmd { name: "quit", aliases: &["q"], op: Op::Quit, arg: Arg::None, what: "quit — asks if there is unsaved work; :q! does not" },
     ExCmd { name: "add", aliases: &["a"], op: Op::Add, arg: Arg::Kind, what: "add an element — bare opens the palette, :add <kind> skips it" },
@@ -96,6 +99,7 @@ pub static COMMANDS: &[ExCmd] = &[
     // Canonically `stack`, so `:lay…` still means layout; `:layers` reaches it as an alias.
     ExCmd { name: "props", aliases: &["properties", "params"], op: Op::Props, arg: Arg::None, what: "the property browser on the cursor's object type, interface or action type (P): its rows, typed" },
     ExCmd { name: "stack", aliases: &["layers", "ly"], op: Op::Layers, arg: Arg::None, what: "the layer browser (:layers): show, hide, lock, reorder, rename layers; move things between them" },
+    ExCmd { name: "tree", aliases: &[], op: Op::Tree, arg: Arg::None, what: "the model tree: a coArchi import's own folders, fold/unfold and search, enter jumps to a view's tab" },
 ];
 
 /// The command a typed name means, if any.
