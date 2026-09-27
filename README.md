@@ -8,14 +8,42 @@ This README is the user's guide: how to build and run it, how to get help while 
 
 ## Prerequisites
 
-- **Rust** — a recent stable toolchain (the crate is on the 2024 edition, so **Rust 1.85 or newer**). Install from <https://rustup.rs>.
 - **A truecolor terminal with a font that has braille.** Every modern one qualifies: Ghostty, Kitty, WezTerm, Alacritty, iTerm2, Windows Terminal.
 
-Nothing else. No accounts, no network.
+Nothing else. No accounts, no network — and no Rust toolchain either, if you install a release below rather than building from source.
 
 ---
 
-## Build & run
+## Installing a release
+
+macOS (Homebrew):
+
+```sh
+brew install currently-unnamed/tap/vim-shapes
+brew upgrade vim-shapes   # later, to pick up a new release
+```
+
+macOS or Linux, without Homebrew:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/currently-unnamed/vim-shapes/releases/latest/download/vim-shapes-installer.sh | sh
+```
+
+**Windows**, in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/currently-unnamed/vim-shapes/releases/latest/download/vim-shapes-installer.ps1 | iex"
+```
+
+That puts `vim-shapes.exe` on your `PATH` and prints how to run it. Windows Terminal is the terminal to run it in — it has truecolor and braille by default; the legacy `cmd.exe`/PowerShell console host does not draw either reliably. Without PowerShell, download `vim-shapes-x86_64-pc-windows-msvc.zip` from the [releases page](https://github.com/currently-unnamed/vim-shapes/releases/latest), extract it anywhere, and either run `vim-shapes.exe` from that folder or add the folder to your `PATH` yourself.
+
+Every platform's binary, and the formula and installer scripts above, are built fresh by CI from a pushed version tag — see `dist-workspace.toml`.
+
+---
+
+## Build & run from source
+
+- **Rust** — a recent stable toolchain (the crate is on the 2024 edition, so **Rust 1.85 or newer**). Install from <https://rustup.rs>.
 
 ```sh
 cargo build --release
