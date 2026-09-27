@@ -907,7 +907,9 @@ fn build_pages() -> Vec<Page> {
              its row yourself.\n\
              \n\
              >  j / k          move the selection\n\
-             >  enter          open a folder's diagram as new tabs; on a folder, fold/unfold\n\
+             >  enter          open a folder's diagram as new tabs, or a registry element in\n\
+             >                 a fresh one of its own; on a folder, fold/unfold\n\
+             >  i              on an element, insert it into the diagram already open instead\n\
              >  → / ←          unfold / fold a folder\n\
              >  n / N          a new diagram, opened right away / a new folder, in whichever\n\
              >                 folder is under the cursor (or beside it, standing on a diagram)\n\
@@ -937,11 +939,13 @@ fn build_pages() -> Vec<Page> {
              own properties win) rather than asking; only a fresh ontology :import disagreeing\n\
              with what is already known asks (see |ontology-kind|, and the paragraph below).\n\
              \n\
-             enter on an element places it onto the diagram you already have open — not a\n\
-             fresh tab — and closes the panel, since placing one is go-edit-it-now; e\n\
-             (expand) from there offers every real relation that element has in *any*\n\
-             diagram under the root, the same way expanding a Foundry resource does. n/N/r/m/d\n\
-             are refused here — an element is read from the diagrams themselves, so it is\n\
+             enter on an element starts a fresh tab holding just that one thing — the same\n\
+             as picking a whole Foundry resource from |tree| does — and closes the panel;\n\
+             e (expand) from there offers every real relation that element has in *any*\n\
+             diagram under the root, the same way expanding a Foundry resource does. i\n\
+             inserts it into the diagram you already have open instead, without starting a\n\
+             new one, for adding it alongside what you are already drawing. n/N/r/m/d are\n\
+             refused here — an element is read from the diagrams themselves, so it is\n\
              edited by opening the one it actually lives in, not from this list.\n"
                 .to_string(),
         ),

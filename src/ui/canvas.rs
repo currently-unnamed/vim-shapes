@@ -450,7 +450,7 @@ impl Scene<'_> {
                 }
                 // The focused node's label is inverse, the same yellow its braille mark wears;
                 // labels sit a row above the line so the marks underneath stay whole.
-                let plain = !focused && !(refused && node == Node::Centre);
+                let plain = !(focused || refused && node == Node::Centre);
                 let style = if focused && node == self.focus_node {
                     Style::new().fg(theme::t().inverse).bg(theme::t().yellow).bold()
                 } else if refused && node == Node::Centre {

@@ -69,7 +69,7 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         if doc.elements[..i].iter().any(|o| o.id == e.id) {
             return Err(format!("element id {} is used twice", e.id));
         }
-        if !(e.w > 0.0 && e.h > 0.0) || !e.x.is_finite() || !e.y.is_finite() {
+        if !(e.w > 0.0 && e.h > 0.0 && e.x.is_finite() && e.y.is_finite()) {
             return Err(format!("element {} has an impossible box", e.id));
         }
     }

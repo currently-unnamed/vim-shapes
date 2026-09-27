@@ -248,7 +248,7 @@ impl Widget for Browser<'_> {
         let hint = match (&s.editing, &s.grabbed, &s.root) {
             (Some(_), _, _) => " type a name — enter, or esc",
             (None, Some(_), _) => " navigate, then p to put it here — esc cancels the move",
-            (None, None, Some(_)) => " j/k move  enter open/toggle  n diagram  N folder  r rename  m move  d delete  esc",
+            (None, None, Some(_)) => " j/k move  enter open  i insert  n diagram  N folder  r rename  m move  d delete  esc",
             (None, None, None) => " j/k move  enter opens it  esc closes",
         };
         let body = chrome::hint(buf, inner, hint);

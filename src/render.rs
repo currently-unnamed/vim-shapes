@@ -261,7 +261,7 @@ pub fn rasterize_with(buf: &Buffer, px: f32, font: &str, doc: Option<&Document>,
             };
             let mut fg = rgb(cell.fg, [235, 219, 178]);
             // A light rendering: the ink that would be the terminal's foreground goes dark.
-            if light && matches!(cell.fg, Color::White | Color::Reset) || (light && cell.fg == theme::t().bright) {
+            if light && (matches!(cell.fg, Color::White | Color::Reset) || cell.fg == theme::t().bright) {
                 fg = [60, 56, 54];
             }
             let (ox, oy) = (c * cw, r * chh);

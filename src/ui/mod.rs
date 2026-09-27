@@ -617,11 +617,25 @@ impl App {
         new_id
     }
 
-    /// A registry `Element` row picked in the workbench: placed onto the *current* diagram
-    /// (not a fresh tab, unlike picking a whole Foundry resource) — "import that specific
-    /// shape kind already referenced" reads as bringing it into what is already open, and
-    /// `e` (expand) offers its real cross-file relationships from there, same as a Foundry
-    /// resource's `ontology_ids` token does.
+    /// `enter` on a registry `Element` row: a fresh tab holding just this one element, ready
+    /// to `e` (expand) into whatever it is really connected to anywhere in the workbench —
+    /// mirrors `place_ontology_resource` for a whole Foundry resource exactly. `i` inserts
+    /// into the diagram already open instead, without starting a new one — see
+    /// `place_registry_resource`.
+    fn open_registry_resource(&mut self, key: &crate::registry::Key) {
+        let Some(entry) = self.registry.as_ref().and_then(|r| r.by_token(&key.token())).cloned() else { return };
+        self.new_tab(View::Ontology);
+        self.checkpoint();
+        let new_id = crate::registry::Registry::place(&mut self.doc, &entry);
+        self.ontology_ids.insert(new_id, key.token());
+        self.cursor = Some(new_id);
+        self.tabs[self.tab].name = entry.name.clone();
+        self.say(format!("{} — e to expand what it connects to", entry.name), Tone::Good);
+    }
+
+    /// `i` on a registry `Element` row: placed onto the *current* diagram instead of a fresh
+    /// one — bringing it into what is already open, for adding it alongside what you are
+    /// already drawing rather than starting from just the one element.
     fn place_registry_resource(&mut self, key: &crate::registry::Key) {
         let Some(entry) = self.registry.as_ref().and_then(|r| r.by_token(&key.token())).cloned() else { return };
         self.checkpoint();
@@ -3230,13 +3244,21 @@ impl App {
                 },
                 Some(workbench::DisplayRow::Group { id, .. }) => st.toggle_group(id),
                 Some(workbench::DisplayRow::Element { key, .. }) => {
-                    // Same idea: placing an element is a "go edit it now" action too. The
-                    // lookup needs `self.workbench`'s registry, so place first, close
-                    // second — the other order would have nothing left to look up.
-                    self.place_registry_resource(&key);
+                    // A fresh tab, not the diagram already open — `i` is for inserting into
+                    // that one instead. The lookup needs `self.workbench`'s registry, so
+                    // open first, close second — the other order would have nothing left to
+                    // look up.
+                    self.open_registry_resource(&key);
                     self.workbench = None;
                 }
                 Some(workbench::DisplayRow::Heading) | None => {}
+            },
+            KeyCode::Char('i') => match sel {
+                Some(workbench::DisplayRow::Element { key, .. }) => {
+                    self.place_registry_resource(&key);
+                    self.workbench = None;
+                }
+                _ => self.say("i inserts a registry element into the diagram already open — stand on one under `elements`", Tone::Bad),
             },
             KeyCode::Right => match sel {
                 Some(workbench::DisplayRow::Fs(row)) if matches!(row.kind, workbench::RowKind::Folder { expanded: false }) => st.expand(&row.path),
@@ -4540,7 +4562,7 @@ impl App {
             && cl.prompt == ':'
         {
             let cands = excmd::candidates(cl.tab_prefix());
-            let show = !cands.is_empty() && !(cands.len() == 1 && cands[0] == cl.buf);
+            let show = !(cands.is_empty() || cands.len() == 1 && cands[0] == cl.buf);
             if show {
                 let menu = wildmenu::WildMenu { candidates: &cands, current: &cl.buf };
                 let h = menu.height(body.height);
@@ -5636,7 +5658,7 @@ mod tests {
     }
 
     #[test]
-    fn the_registry_lets_you_place_an_element_from_another_diagram_and_expand_its_real_relation() {
+    fn enter_opens_a_registry_element_in_a_new_tab_and_expands_its_real_relation_while_i_inserts_into_the_open_one() {
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-registry-key-config-{}", std::process::id()));
         // SAFETY: this test alone touches the variable, and only reads it back through the
         // config module.
@@ -5671,13 +5693,15 @@ mod tests {
         let order_row = rows.iter().position(|r| matches!(r, workbench::DisplayRow::Element { name, .. } if name == "Order")).unwrap();
         st.sel = order_row;
 
-        // Placed onto the current (third, unrelated) diagram — not a fresh tab.
+        // Enter starts a fresh tab holding just this one element — not the diagram already
+        // open, unlike `i`, which is tested separately below.
         let tabs_before = a.tabs.len();
         key(&mut a, KeyCode::Enter);
-        assert_eq!(a.tabs.len(), tabs_before, "landed on the diagram already open, not a new tab");
+        assert_eq!(a.tabs.len(), tabs_before + 1, "a new tab, not the one already open");
+        assert_eq!(a.tab_name(), "Order");
         assert_eq!(a.doc.elements.len(), 1);
         assert_eq!(a.doc.elements[0].display(), "Order");
-        assert!(a.workbench.is_none(), "placing an element closes the panel, like picking a tree resource does — so the diagram's own keys (e) work right after");
+        assert!(a.workbench.is_none(), "opening an element closes the panel, like picking a tree resource does — so the diagram's own keys (e) work right after");
 
         key(&mut a, KeyCode::Char('e'));
         assert!(a.expandpick.is_some(), "Order's real link to Customer, from the other diagram, is offered");
@@ -5686,6 +5710,25 @@ mod tests {
         assert_eq!(a.doc.elements.len(), 2, "Customer is now on this diagram too");
         assert!(a.doc.elements.iter().any(|e| e.display() == "Customer"));
         assert!(a.doc.relations.iter().any(|r| r.kind == RelationKind::LinkType));
+
+        // `i`, by contrast, inserts into the diagram already open rather than starting a
+        // new one — reopen the workbench, standing on the same tab, and use it.
+        a.run_excmd("workbench".into());
+        let st = a.workbench.as_mut().unwrap();
+        st.expand_group(workbench::GroupId::Root);
+        st.expand_group(workbench::GroupId::Layer(ShapeKind::ObjectType.layer()));
+        st.expand_group(workbench::GroupId::Kind(ShapeKind::ObjectType));
+        let rows = st.display_rows(a.registry.as_ref());
+        let customer_row = rows.iter().position(|r| matches!(r, workbench::DisplayRow::Element { name, .. } if name == "Customer")).unwrap();
+        st.sel = customer_row;
+
+        let tabs_before = a.tabs.len();
+        let elements_before = a.doc.elements.len();
+        key(&mut a, KeyCode::Char('i'));
+        assert_eq!(a.tabs.len(), tabs_before, "no new tab — inserted into this one");
+        assert_eq!(a.tab_name(), "Order", "still the same tab");
+        assert_eq!(a.doc.elements.len(), elements_before + 1);
+        assert!(a.workbench.is_none(), "closes the panel too, same as enter");
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&config_dir).ok();
