@@ -332,6 +332,7 @@ fn fit(s: &str, room: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn sample() -> Vec<wb::Node> {
         vec![
@@ -378,5 +379,107 @@ mod tests {
         assert_eq!(s.sel, 2);
         s.move_by(1, 3);
         assert_eq!(s.sel, 0);
+        s.move_by(1, 0);
+        assert_eq!(s.sel, 0, "nothing to walk: stays put rather than dividing by zero");
+    }
+
+    #[test]
+    fn recents_starts_rootless_and_expand_toggle_group_each_flip_their_own_set() {
+        let st = State::recents(vec![PathBuf::from("/a")]);
+        assert!(st.root.is_none(), "no folder chosen yet");
+        assert_eq!(st.recents, vec![PathBuf::from("/a")]);
+
+        let mut st = State::opened(PathBuf::from("/root"));
+        let p = PathBuf::from("/root/Billing");
+        assert!(!st.expanded.contains(&p));
+        st.expand(&p);
+        assert!(st.expanded.contains(&p));
+        st.toggle_expanded(&p);
+        assert!(!st.expanded.contains(&p), "toggle closes what expand opened");
+        st.toggle_expanded(&p);
+        assert!(st.expanded.contains(&p), "toggle opens it again");
+
+        assert!(!st.groups_expanded.contains(&GroupId::Root));
+        st.toggle_group(GroupId::Root);
+        assert!(st.groups_expanded.contains(&GroupId::Root));
+        st.toggle_group(GroupId::Root);
+        assert!(!st.groups_expanded.contains(&GroupId::Root), "toggle again closes it");
+    }
+
+    fn entry(kind: ShapeKind, name: &str) -> registry::Entry {
+        registry::Entry {
+            key: registry::Key { kind, ident: registry::Ident::Name(name.into()) },
+            name: name.into(),
+            api_name: None,
+            properties: Vec::new(),
+            status: crate::model::Status::Active,
+            seen_in: 1,
+        }
+    }
+
+    #[test]
+    fn a_row_s_own_entry_is_what_move_and_delete_take() {
+        let rows = rows(&sample(), &HashSet::new());
+        let e = rows[0].entry();
+        assert_eq!(e.path, PathBuf::from("/root/Billing"));
+        assert_eq!(e.kind, wb::NodeKind::Folder);
+    }
+
+    #[test]
+    fn the_browser_draws_recents_a_tree_being_edited_and_the_registry_s_groups() {
+        let render = |w: u16, h: u16, st: &State, registry: Option<&registry::Registry>| -> Vec<String> {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            Browser { state: st, registry }.render(area, &mut buf);
+            (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect()
+        };
+        let dump = |out: &[String]| out.concat();
+
+        // No folder chosen yet: the recents list, or the reason there is none.
+        let empty = State::recents(Vec::new());
+        let out = dump(&render(50, 8, &empty, None));
+        assert!(out.contains("no workbench opened yet"), "{out}");
+        let picked = State::recents(vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        let out = dump(&render(50, 8, &picked, None));
+        assert!(out.contains("/a") && out.contains("/b"), "{out}");
+
+        // A real tree, typing a rename, then typing a brand new name.
+        let mut st = State::opened(PathBuf::from("/root"));
+        st.nodes = sample();
+        st.sel = 0;
+        st.editing = Some((Typing::Rename, "renamed".into()));
+        let out = dump(&render(50, 8, &st, None));
+        assert!(out.contains("renamed"), "typing a rename shows the buffer in place: {out}");
+        st.editing = Some((Typing::NewFolder, "fresh".into()));
+        let out = dump(&render(50, 8, &st, None));
+        assert!(out.contains("new:") && out.contains("fresh"), "{out}");
+        st.editing = None;
+
+        // A row grabbed for a move reads differently, and asks for `p` instead of the usual keys.
+        st.grabbed = Some(rows(&sample(), &HashSet::new())[1].entry());
+        let out = dump(&render(50, 8, &st, None));
+        assert!(out.contains("p to put it here"), "{out}");
+        st.grabbed = None;
+
+        // The registry's own section: closed root, an open layer with a closed kind under
+        // it, and a second layer left closed — both branches `display_rows` skips over.
+        let reg = registry::Registry {
+            entries: HashMap::from([
+                (registry::Key { kind: ShapeKind::ApplicationComponent, ident: registry::Ident::Name("CRM".into()) }, entry(ShapeKind::ApplicationComponent, "CRM")),
+                (registry::Key { kind: ShapeKind::BusinessActor, ident: registry::Ident::Name("Ops".into()) }, entry(ShapeKind::BusinessActor, "Ops")),
+            ]),
+            edges: Vec::new(),
+        };
+        let out = dump(&render(50, 12, &st, Some(&reg)));
+        assert!(out.contains("elements"), "the section itself always shows, once the registry has anything: {out}");
+        assert!(!out.contains("CRM") && !out.contains("Ops"), "but nothing under it while the root is closed: {out}");
+        st.toggle_group(GroupId::Root);
+        st.toggle_group(GroupId::Layer(ShapeKind::ApplicationComponent.layer()));
+        let out = dump(&render(50, 12, &st, Some(&reg)));
+        assert!(out.contains("elements"), "the root section, opened: {out}");
+        assert!(!out.contains("CRM"), "its kind group is still closed: {out}");
+        st.toggle_group(GroupId::Kind(ShapeKind::ApplicationComponent));
+        let out = dump(&render(50, 12, &st, Some(&reg)));
+        assert!(out.contains("CRM"), "opened all the way down to the element: {out}");
     }
 }

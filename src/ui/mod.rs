@@ -537,11 +537,37 @@ impl App {
         self.switch_tab(self.tabs.len() - 1);
     }
 
+    /// A tab with nothing on it and no file of its own — the app's own starting tab, or one
+    /// just made by `:new`, before anything has touched it.
+    fn tab_is_blank(&self, idx: usize) -> bool {
+        let doc = if idx == self.tab { &self.doc } else { &self.tabs[idx].doc };
+        doc.elements.is_empty() && doc.relations.is_empty() && self.tabs[idx].source.is_none()
+    }
+
+    /// Removes `idx` without asking, if it is still blank and is not the tab just switched
+    /// to — called right after opening something into a *fresh* tab, when `idx` names the
+    /// tab that was standing empty right before that happened, so it does not linger once
+    /// there is somewhere better to be. Never called from `^t`/`:tabnew` making a tab on
+    /// purpose — the same emptiness there is the point, not an accident to clean up.
+    fn drop_if_still_blank(&mut self, idx: usize) {
+        if idx == self.tab || self.tabs.len() <= 1 || !self.tab_is_blank(idx) {
+            return;
+        }
+        self.tabs.remove(idx);
+        if idx < self.tab {
+            self.tab -= 1;
+        }
+    }
+
     /// `:tabnew <path>` — a diagram `:export`ed with `Format::Diagram` (or any other single-
     /// tab file this app itself could open), added as a new tab rather than replacing the
     /// workspace the way `:import`/`:open` do. Purely additive — every other tab is
     /// untouched — so, unlike those, this never needs to ask about unsaved work first.
     fn tabnew_from_path(&mut self, path: PathBuf) {
+        // Unlike the workbench/ontology "go look at this" actions, `:tabnew` never replaces
+        // any tab, blank or not — its whole contract is purely additive (see the doc comment
+        // above), and a blank tab you just deliberately made with an *earlier* `:tabnew` is
+        // exactly the case that contract has to hold for.
         match persistence::load(&path) {
             Ok(ws) if ws.tabs.len() == 1 => {
                 let Tab { name, diagram } = ws.tabs.into_iter().next().expect("checked len == 1");
@@ -559,6 +585,7 @@ impl App {
     /// (or no longer) in the index — the tree is only ever built from it, so that should not
     /// happen, but a stale row is not worth a panic over.
     fn place_ontology_resource(&mut self, id: &str) {
+        let blank = self.tab_is_blank(self.tab).then_some(self.tab);
         self.new_tab(View::Ontology);
         self.checkpoint();
         let Some(index) = &self.ontology else { return };
@@ -575,6 +602,9 @@ impl App {
         self.cursor = Some(new_id);
         let name = self.doc.element(new_id).map(|e| e.display()).unwrap_or_default();
         self.tabs[self.tab].name = name.clone();
+        if let Some(idx) = blank {
+            self.drop_if_still_blank(idx);
+        }
         self.say(format!("{name} — e to expand what it connects to"), Tone::Good);
     }
 
@@ -624,12 +654,16 @@ impl App {
     /// `place_registry_resource`.
     fn open_registry_resource(&mut self, key: &crate::registry::Key) {
         let Some(entry) = self.registry.as_ref().and_then(|r| r.by_token(&key.token())).cloned() else { return };
+        let blank = self.tab_is_blank(self.tab).then_some(self.tab);
         self.new_tab(View::Ontology);
         self.checkpoint();
         let new_id = crate::registry::Registry::place(&mut self.doc, &entry);
         self.ontology_ids.insert(new_id, key.token());
         self.cursor = Some(new_id);
         self.tabs[self.tab].name = entry.name.clone();
+        if let Some(idx) = blank {
+            self.drop_if_still_blank(idx);
+        }
         self.say(format!("{} — e to expand what it connects to", entry.name), Tone::Good);
     }
 
@@ -3018,6 +3052,10 @@ impl App {
     /// same as `tabnew_from_path`, so unlike `:open` this never needs to ask about unsaved
     /// work first.
     fn workbench_open_diagram(&mut self, path: PathBuf) {
+        // Noted before anything else changes: if the tab standing here is still blank (the
+        // app's own starting tab, most often), opening a real diagram replaces it outright
+        // rather than piling up alongside a tab nobody was going to use.
+        let blank = self.tab_is_blank(self.tab).then_some(self.tab);
         // Dedup by the file's own real path, not by a tab's name — a name is not a stable
         // identity (a multi-tab file's first tab can be called anything at all, including
         // the generic "diagram 1" every fresh session already starts with) and matching on
@@ -3026,6 +3064,9 @@ impl App {
         // like the file had nothing in it.
         if let Some(i) = self.tabs.iter().position(|t| t.source.as_deref() == Some(path.as_path())) {
             self.switch_tab(i);
+            if let Some(idx) = blank {
+                self.drop_if_still_blank(idx);
+            }
             self.say(format!("{} — already open", path.display()), Tone::Note);
             return;
         }
@@ -3048,6 +3089,9 @@ impl App {
                     self.tabs.push(TabSlot { name, doc: diagram, source: Some(path.clone()), ..Default::default() });
                 }
                 self.switch_tab(land_on);
+                if let Some(idx) = blank {
+                    self.drop_if_still_blank(idx);
+                }
                 self.say(format!("opened {}", path.display()), Tone::Good);
             }
             Err(e) => self.say(e.to_string(), Tone::Bad),
@@ -4788,6 +4832,21 @@ mod tests {
         a.on_key(Stroke::code(code).event());
     }
 
+    /// Points `XDG_CONFIG_HOME` at a scratch directory for the life of the returned guard.
+    /// The variable is process-global but `cargo test` runs many tests concurrently in one
+    /// process, so setting it directly — as every config-writing test once did — let two such
+    /// tests race and read back whichever directory the other had just pointed it at. Holding
+    /// this lock for the whole test serializes them against each other without serializing
+    /// against everything else.
+    fn isolated_config_home(dir: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // SAFETY: `guard` is held until the caller's test returns, so no other thread can be
+        // between this call and its own reads of the variable.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir) };
+        guard
+    }
+
     fn two(a: &mut App) -> (ElementId, ElementId) {
         let x = a.doc.add(ApplicationComponent, "CRM", 2.0, 2.0);
         let y = a.doc.add(ApplicationService, "Contacts API", 30.0, 2.0);
@@ -4830,9 +4889,7 @@ mod tests {
         // Confirming writes back through `config::touch_workbench` — isolate it from the
         // real config file the same way the theme test isolates `XDG_CONFIG_HOME`.
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-start-workbench-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let mut a = App::new();
         press(&mut a, ":");
         assert!(a.start.is_some());
@@ -5357,9 +5414,7 @@ mod tests {
     #[test]
     fn closing_and_reopening_the_workbench_panel_returns_to_the_same_one_without_asking() {
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-onesession-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-onesession-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5385,9 +5440,7 @@ mod tests {
     #[test]
     fn shift_w_toggles_the_workbench_open_and_closed_the_same_as_bare_workbench() {
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-shiftw-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-shiftw-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5416,9 +5469,7 @@ mod tests {
     #[test]
     fn opening_a_diagram_from_the_workbench_opens_a_tab_closes_the_panel_and_shows_its_real_shapes() {
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-openclose-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-openclose-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5447,8 +5498,10 @@ mod tests {
         key(&mut a, KeyCode::Enter);
 
         // The diagram opened in a tab, named after the file (a single-tab file's own
-        // internal tab name is not what matters — the file's own name is).
-        assert_eq!(a.tabs.len(), 2, "the session's own starting tab, plus the one just opened");
+        // internal tab name is not what matters — the file's own name is). The session's
+        // starting tab was still blank, so it is replaced outright, not piled under a
+        // second one.
+        assert_eq!(a.tabs.len(), 1, "the blank starting tab is replaced, not added alongside");
         assert_eq!(a.tab_name(), "assets");
         // The workbench closed.
         assert!(a.workbench.is_none(), "the panel closes once you've picked something to look at");
@@ -5466,9 +5519,7 @@ mod tests {
     #[test]
     fn deleting_an_element_s_last_diagram_drops_it_from_the_registry_as_soon_as_it_is_saved() {
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-stale-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-stale-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5509,9 +5560,7 @@ mod tests {
     #[test]
     fn bare_w_on_a_workbench_tab_saves_back_to_its_own_file_without_asking_and_keeps_its_siblings() {
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-savepath-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-savepath-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5559,9 +5608,7 @@ mod tests {
         // the generic name every fresh session's own blank tab already has — dedup-by-name
         // would find that unrelated blank tab and switch to it, never loading the file.
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-multitab-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-multitab-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5593,7 +5640,7 @@ mod tests {
         a.workbench.as_mut().unwrap().sel = row_i;
         key(&mut a, KeyCode::Enter);
 
-        assert_eq!(a.tabs.len(), 3, "the session's own blank tab, plus both of the file's own");
+        assert_eq!(a.tabs.len(), 2, "just the file's own two tabs — the blank starting one is dropped, not left alongside them");
         assert_eq!(a.tab_name(), "Asset", "landed on the second of the two tabs just added");
         assert_eq!(a.doc.elements.len(), 1, "the file's real content — not 0, the bug's own symptom");
         assert_eq!(a.doc.elements[0].display(), "Asset");
@@ -5607,9 +5654,7 @@ mod tests {
         // Opening a workbench writes back through `config::touch_workbench` — isolate it
         // from the real config file the same way the theme test isolates `XDG_CONFIG_HOME`.
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-workbench-key-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-workbench-key-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5623,7 +5668,7 @@ mod tests {
         press(&mut a, "Checkout Flow");
         key(&mut a, KeyCode::Enter);
         assert!(root.join("Checkout Flow.json").exists());
-        assert_eq!(a.tabs.len(), 2, "the fresh diagram opened as a new tab immediately");
+        assert_eq!(a.tabs.len(), 1, "the blank starting tab is replaced, not added alongside");
         assert_eq!(a.tab_name(), "Checkout Flow");
         assert!(a.workbench.is_none(), "the panel closes — go edit it now");
         assert_eq!(a.tabs[a.tab].source.as_deref(), Some(root.canonicalize().unwrap().join("Checkout Flow.json").as_path()), "and it knows where :w saves it back to");
@@ -5641,7 +5686,7 @@ mod tests {
             .unwrap();
         a.workbench.as_mut().unwrap().sel = row_i;
         key(&mut a, KeyCode::Enter);
-        assert_eq!(a.tabs.len(), 2, "still two — the second Enter switched to the tab already open, not a third");
+        assert_eq!(a.tabs.len(), 1, "still just the one — the second Enter switched to the tab already open, not a second");
         assert_eq!(a.tab_name(), "Checkout Flow");
         assert!(a.workbench.is_none(), "opening a diagram closes the panel, the same as placing a registry element or making a new one");
 
@@ -5660,9 +5705,7 @@ mod tests {
     #[test]
     fn enter_opens_a_registry_element_in_a_new_tab_and_expands_its_real_relation_while_i_inserts_into_the_open_one() {
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-registry-key-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-registry-key-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5694,10 +5737,12 @@ mod tests {
         st.sel = order_row;
 
         // Enter starts a fresh tab holding just this one element — not the diagram already
-        // open, unlike `i`, which is tested separately below.
+        // open, unlike `i`, which is tested separately below. The count itself does not
+        // grow here only because the session's starting tab was still blank, so the fresh
+        // tab replaces it rather than piling up alongside it.
         let tabs_before = a.tabs.len();
         key(&mut a, KeyCode::Enter);
-        assert_eq!(a.tabs.len(), tabs_before + 1, "a new tab, not the one already open");
+        assert_eq!(a.tabs.len(), tabs_before, "the blank starting tab is replaced by the fresh one, not added alongside");
         assert_eq!(a.tab_name(), "Order");
         assert_eq!(a.doc.elements.len(), 1);
         assert_eq!(a.doc.elements[0].display(), "Order");
@@ -5705,6 +5750,13 @@ mod tests {
 
         key(&mut a, KeyCode::Char('e'));
         assert!(a.expandpick.is_some(), "Order's real link to Customer, from the other diagram, is offered");
+        {
+            use ratatui::{backend::TestBackend, Terminal};
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| a.draw(f)).unwrap();
+            let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+            assert!(out.contains("what this connects to"), "the expand picker draws its own dialog");
+        }
         key(&mut a, KeyCode::Enter);
         assert!(a.expandpick.is_none());
         assert_eq!(a.doc.elements.len(), 2, "Customer is now on this diagram too");
@@ -5740,9 +5792,7 @@ mod tests {
         // the app's working directory differs between runs. Isolated from the real config
         // file the same way the other config-writing tests are.
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-workbench-canon-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-workbench-canon-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5762,9 +5812,7 @@ mod tests {
     #[test]
     fn importing_an_ontology_that_disagrees_with_the_registry_opens_the_resolver() {
         let config_dir = std::env::temp_dir().join(format!("vim-shapes-conflict-config-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let _config_home = isolated_config_home(&config_dir);
         let root = std::env::temp_dir().join(format!("vim-shapes-conflict-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5806,6 +5854,14 @@ mod tests {
         assert!(a.conflictpick.is_some(), "customer's properties disagree with what the registry already had");
         assert_eq!(a.conflictpick.as_ref().unwrap().conflicts.len(), 1);
         assert_eq!(a.conflictpick.as_ref().unwrap().current().unwrap().name, "Customer");
+
+        {
+            use ratatui::{backend::TestBackend, Terminal};
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| a.draw(f)).unwrap();
+            let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+            assert!(out.contains("resolve conflict"), "the conflict resolver draws its own dialog");
+        }
 
         key(&mut a, KeyCode::Char('i'));
         assert!(a.conflictpick.is_none(), "the only conflict is resolved, so the dialog closes itself");
@@ -6169,6 +6225,24 @@ mod tests {
         let (x, _) = two(&mut a);
         press(&mut a, "o");
         assert!(matches!(a.palette.as_ref().map(|p| p.purpose), Some(palette::Purpose::Relate(ShapeKind::ApplicationComponent))));
+        {
+            use ratatui::{backend::TestBackend, Terminal};
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| a.draw(f)).unwrap();
+            let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+            assert!(out.contains("suggested"), "an empty filter while relating leads with the suggested lines: {out}");
+        }
+        press(&mut a, "zzz-nothing-like-a-kind");
+        {
+            use ratatui::{backend::TestBackend, Terminal};
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| a.draw(f)).unwrap();
+            let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+            assert!(out.contains("nothing matches"), "{out}");
+        }
+        for _ in 0.."zzz-nothing-like-a-kind".chars().count() {
+            key(&mut a, KeyCode::Backspace);
+        }
         press(&mut a, "app-service");
         key(&mut a, KeyCode::Enter);
         assert_eq!(a.doc.elements.len(), 3);
@@ -6801,8 +6875,22 @@ mod tests {
         press(&mut a, "n");
         assert_eq!(a.palette.as_ref().unwrap().dir, Some(4));
         assert_eq!(a.palette.as_ref().unwrap().filter, "", "the compass took the key, not the search");
+        {
+            use ratatui::{backend::TestBackend, Terminal};
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| a.draw(f)).unwrap();
+            let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+            assert!(out.contains("direction"), "the compass grid draws with a direction chosen: {out}");
+        }
         key(&mut a, KeyCode::Tab);
         press(&mut a, "app-service");
+        {
+            use ratatui::{backend::TestBackend, Terminal};
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| a.draw(f)).unwrap();
+            let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+            assert!(out.contains("Application Service"), "a match while relating shows the relation's own verb and tagline: {out}");
+        }
         key(&mut a, KeyCode::Enter);
         key(&mut a, KeyCode::Enter);
         let from = a.doc.element(x).unwrap().clone();
@@ -7302,9 +7390,7 @@ mod tests {
     #[test]
     fn theme_switches_the_palette_keeps_the_choice_in_the_config_file_and_says_why() {
         let dir = std::env::temp_dir().join(format!("vim-shapes-theme-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        let _config_home = isolated_config_home(&dir);
         let mut a = app();
         two(&mut a);
         a.run_excmd("theme light".into());
@@ -7455,9 +7541,7 @@ mod tests {
     #[test]
     fn ink_switches_between_line_art_and_braille_and_keeps_the_choice() {
         let dir = std::env::temp_dir().join(format!("vim-shapes-ink-{}", std::process::id()));
-        // SAFETY: this test alone touches the variable, and only reads it back through the
-        // config module.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        let _config_home = isolated_config_home(&dir);
         let mut a = app();
         two(&mut a);
         a.run_excmd("ink lines".into());
@@ -7548,6 +7632,39 @@ mod tests {
         key(&mut a, KeyCode::Enter);
         term.draw(|f| a.draw(f)).unwrap();
         key(&mut a, KeyCode::Esc);
+
+        // The dialogs and pickers that a real diagramming session opens but the scripted
+        // key-driven tests above never happen to `term.draw` while open.
+        a.on_key(Stroke::ctrl('t').event());
+        term.draw(|f| a.draw(f)).unwrap();
+        let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(out.contains("which kind of diagram"), "the new-tab picker");
+        key(&mut a, KeyCode::Esc);
+
+        click(&mut a, MouseButton::Right, (2.0, 2.0));
+        term.draw(|f| a.draw(f)).unwrap();
+        let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(out.contains("runs it"), "the right-click menu");
+        key(&mut a, KeyCode::Esc);
+
+        a.run_excmd("layers".into());
+        term.draw(|f| a.draw(f)).unwrap();
+        let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(out.contains("top first"), "the layer browser");
+        key(&mut a, KeyCode::Esc);
+
+        press(&mut a, ":ex");
+        term.draw(|f| a.draw(f)).unwrap();
+        let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(out.contains("export"), "the wildmenu offers a completion");
+        key(&mut a, KeyCode::Esc);
+
+        a.run_excmd("export".into());
+        term.draw(|f| a.draw(f)).unwrap();
+        let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(out.contains("h/l cycle"), "the export dialog");
+        key(&mut a, KeyCode::Esc);
+
         a.run_excmd("help".into());
         term.draw(|f| a.draw(f)).unwrap();
         let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();

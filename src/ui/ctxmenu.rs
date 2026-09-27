@@ -132,7 +132,19 @@ mod tests {
     fn moving_and_cancel() {
         let w = keymap::sample_wheres().remove(0);
         let mut s = State::new(&w);
-        assert!(!s.rows.is_empty(), "the normal mode always has something to run");
+        assert!(s.rows.len() > 1, "the normal mode has more than one thing to run, so moving means something here");
+        s.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(s.sel, 1, "j moves down");
+        s.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(s.sel, 2, "down does the same as j");
+        s.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(s.sel, 1, "k moves back up");
+        s.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(s.sel, 0, "up does the same as k");
+        s.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(s.sel, s.rows.len() - 1, "k wraps from the top to the bottom");
+        s.sel = 0;
+
         let first = s.rows[0].cmd;
         match s.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
             Outcome::Run(cmd) => assert_eq!(cmd.keys, first.keys),

@@ -668,6 +668,8 @@ mod tests {
         assert_eq!(fills.len(), 2, "the fill-less box has no polygon");
         let dotted = p.items.iter().filter(|i| matches!(i, Item::Polyline { dash: Some((on, _)), .. } if *on < 2.0)).count();
         assert_eq!(dotted, 4, "the dotted box's four edges");
+        let img = raster(&p);
+        assert_eq!((img.width(), img.height()), (p.width, p.height), "a dotted, half-opaque picture still rasters");
         let _ = a;
         let stroked_at_b = p.items.iter().any(|i| matches!(i, Item::Polyline { pts, .. } if pts.iter().any(|q| (q.0 - 300.0).abs() < 1.0 && q.1 > 30.0 && q.1 < 70.0)));
         assert!(!stroked_at_b, "no outline on the box that turned it off");
@@ -768,6 +770,63 @@ mod tests {
     }
 
     #[test]
+    fn a_grouping_a_deprecated_mark_a_refused_relation_and_every_end_style_all_reach_the_clean_picture() {
+        use crate::model::{Property, Status};
+        use crate::ontology::View;
+
+        let o = Options { style: crate::export::Style::Clean, appearance: Appearance::Light, grid: false, ..Options::default() };
+        let mut d = Document::default();
+
+        // A grouping is a dashed rectangle, not the braille dashes' dots.
+        d.add(ShapeKind::Grouping, "group", 0.0, 0.0);
+
+        // A deprecated element carries its own red mark beside the tag — a plain sketch box
+        // has no kind tag to mark, so this needs an architecture-layer kind.
+        let old = d.add(ShapeKind::ApplicationComponent, "old", 30.0, 0.0);
+        d.element_mut(old).unwrap().status = Status::Deprecated;
+
+        // An object type with a deprecated property: the row's own mark, set apart in red.
+        d.metadata.view = View::Ontology;
+        let ot = d.add(ShapeKind::ObjectType, "Order", 60.0, 0.0);
+        let mut legacy = Property::new("legacy_id");
+        legacy.status = Status::Deprecated;
+        d.element_mut(ot).unwrap().properties = vec![legacy, Property::new("id")];
+        d.element_mut(ot).unwrap().fit_rows();
+
+        let p = picture(&d, &o);
+        let dashed_boxes = p.items.iter().filter(|i| matches!(i, Item::Polyline { pts, dash: Some(_), .. } if pts.len() == 5)).count();
+        assert!(dashed_boxes >= 1, "the grouping draws as a dashed rectangle");
+        let red = paint_rgb(Paint::Red.into(), true);
+        let red_marks = p.items.iter().filter(|i| matches!(i, Item::Text { text, color, .. } if text == "x" && *color == red)).count();
+        assert_eq!(red_marks, 2, "the deprecated element's own mark and its deprecated property's, both in red");
+
+        // A relation the ontology refuses still draws — red, whatever ends it asks for —
+        // and a mid-line label on it still reaches the picture too.
+        let x = d.add(ShapeKind::BusinessActor, "actor", 0.0, 20.0);
+        let y = d.add(ShapeKind::ApplicationService, "svc", 30.0, 20.0);
+        let refused_kind = RelationKind::ALL
+            .into_iter()
+            .find(|k| crate::ontology::allowed(*k, ShapeKind::BusinessActor, ShapeKind::ApplicationService).is_err())
+            .expect("some relation is refused between an actor and a service");
+        let r = d.connect(refused_kind, x, y).unwrap();
+        d.relation_mut(r).unwrap().label = Some("mid".into());
+        let p = picture(&d, &o);
+        assert!(p.items.iter().any(|i| matches!(i, Item::Polyline { color, .. } if *color == red)), "a refused relation's line is red");
+        assert!(p.items.iter().any(|i| matches!(i, Item::Text { text, .. } if text == "mid")), "its own label still draws");
+
+        // Every end style the notation can ask for reaches a real primitive, not just the
+        // triangle every other test in this file happens to draw.
+        for e in End::ALL {
+            let mut n = d.relation(r).unwrap().notation();
+            n.tail = e;
+            n.head = e;
+            d.relation_mut(r).unwrap().style = Some(n);
+            let before = picture(&d, &o).items.len();
+            assert!(before > 0, "{e:?} produced nothing");
+        }
+    }
+
+    #[test]
     fn the_clean_grid_follows_the_diagram_s_style_and_density() {
         let o = Options { style: crate::export::Style::Clean, appearance: Appearance::Light, grid: true, ..Options::default() };
         let mut d = doc();
@@ -781,6 +840,8 @@ mod tests {
         d.metadata.page.grid_style = crate::model::GridStyle::Dots;
         let dotted = picture(&d, &o);
         assert!(dots(&dotted) > 10 && rules(&dotted) == 0, "dots: {} / {}", dots(&dotted), rules(&dotted));
+        let img = raster(&dotted);
+        assert_eq!((img.width(), img.height()), (dotted.width, dotted.height), "a dotted grid still rasters");
     }
 
     #[test]

@@ -32,3 +32,43 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --locked
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: measure coverage
+        run: |
+          cargo llvm-cov --locked --lcov --output-path lcov.info 2>&1 | tee test-output.txt
+          cargo llvm-cov report --html
+      - name: write job summary
+        if: always()
+        run: |
+          {
+            echo "## Test & coverage summary"
+            echo
+            echo '```'
+            grep -E '^test result:' test-output.txt || echo "no test result line — see the log above"
+            echo '```'
+            echo
+            echo "<details><summary>Coverage by file</summary>"
+            echo
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: |
+            lcov.info
+            target/llvm-cov/html
