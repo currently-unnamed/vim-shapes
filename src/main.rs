@@ -10,6 +10,7 @@ mod layout;
 mod model;
 mod ontology;
 mod persistence;
+mod registry;
 mod render;
 mod shapes;
 mod ui;

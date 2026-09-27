@@ -14,6 +14,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use super::{chrome, theme};
+use crate::ontology::{Layer, ShapeKind};
+use crate::registry;
 use crate::workbench as wb;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
@@ -29,9 +31,18 @@ pub enum Typing {
     Rename,
 }
 
+/// A registry grouping node's identity — the whole "elements" section, one layer, or one
+/// kind within it — for the fold state a `Group` row's `expanded` reads.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum GroupId {
+    Root,
+    Layer(Layer),
+    Kind(ShapeKind),
+}
+
 pub struct State {
-    /// `None` while a folder has never been chosen this run — `rows`/`recents` decide which
-    /// the browser shows.
+    /// `None` while a folder has never been chosen this run — `display_rows`/`recents`
+    /// decide which the browser shows.
     pub root: Option<PathBuf>,
     pub nodes: Vec<wb::Node>,
     /// Every workbench opened before, most-recent first — shown as pickable rows in place of
@@ -40,6 +51,9 @@ pub struct State {
     /// Folders open, by path. Reconciled by path on every rescan; a folder that was just
     /// renamed or moved simply loses its fold state, which is not worth tracking through one.
     expanded: HashSet<PathBuf>,
+    /// Registry grouping nodes open, by `GroupId` — untouched by a rescan, since layers and
+    /// kinds (unlike a folder's path) never change identity under a rebuilt registry.
+    groups_expanded: HashSet<GroupId>,
     pub sel: usize,
     pub editing: Option<(Typing, String)>,
     /// `m` on a row grabs it here; `p` on a folder row puts it there.
@@ -48,37 +62,80 @@ pub struct State {
 
 impl State {
     pub fn recents(recents: Vec<PathBuf>) -> State {
-        State { root: None, nodes: Vec::new(), recents, expanded: HashSet::new(), sel: 0, editing: None, grabbed: None }
+        State { root: None, nodes: Vec::new(), recents, expanded: HashSet::new(), groups_expanded: HashSet::new(), sel: 0, editing: None, grabbed: None }
     }
 
     pub fn opened(root: PathBuf) -> State {
         let nodes = wb::scan(&root);
-        State { root: Some(root), nodes, recents: Vec::new(), expanded: HashSet::new(), sel: 0, editing: None, grabbed: None }
+        State { root: Some(root), nodes, recents: Vec::new(), expanded: HashSet::new(), groups_expanded: HashSet::new(), sel: 0, editing: None, grabbed: None }
     }
 
-    /// Re-read the folder from disk — after every create, rename, move or delete.
+    /// Re-read the folder from disk — after every create, rename, move or delete. The
+    /// registry is `App`'s own field, not this panel's — it has to survive the panel
+    /// closing (placing an element does, right before `e` needs it), so `App::rescan_workbench`
+    /// rebuilds it alongside this.
     pub fn rescan(&mut self) {
         if let Some(root) = &self.root {
             self.nodes = wb::scan(root);
         }
     }
 
-    pub fn rows(&self) -> Vec<Row> {
-        rows(&self.nodes, &self.expanded)
+    /// The one list `sel` walks: the real folder tree, then — if `registry` has anything in
+    /// it — the virtual "elements" section, grouped by layer then kind, each level shown
+    /// only when something is actually under it (`tree.rs`'s rule for a *derived* grouping,
+    /// unlike a real folder above, which is shown even empty). `registry` lives on `App`,
+    /// not here — see `rescan`'s doc comment for why.
+    pub fn display_rows(&self, registry: Option<&registry::Registry>) -> Vec<DisplayRow> {
+        let mut out: Vec<DisplayRow> = rows(&self.nodes, &self.expanded).into_iter().map(DisplayRow::Fs).collect();
+        let Some(reg) = registry else { return out };
+        if reg.entries.is_empty() {
+            return out;
+        }
+        let root_open = self.groups_expanded.contains(&GroupId::Root);
+        out.push(DisplayRow::Heading);
+        out.push(DisplayRow::Group { id: GroupId::Root, label: "elements".into(), depth: 0, expanded: root_open });
+        if !root_open {
+            return out;
+        }
+        for layer in Layer::ALL {
+            let kinds: Vec<ShapeKind> = ShapeKind::ALL.into_iter().filter(|k| k.layer() == layer && reg.entries.keys().any(|key| key.kind == *k)).collect();
+            if kinds.is_empty() {
+                continue;
+            }
+            let layer_open = self.groups_expanded.contains(&GroupId::Layer(layer));
+            out.push(DisplayRow::Group { id: GroupId::Layer(layer), label: layer.name().to_string(), depth: 1, expanded: layer_open });
+            if !layer_open {
+                continue;
+            }
+            for kind in kinds {
+                let kind_open = self.groups_expanded.contains(&GroupId::Kind(kind));
+                out.push(DisplayRow::Group { id: GroupId::Kind(kind), label: kind.name().to_string(), depth: 2, expanded: kind_open });
+                if !kind_open {
+                    continue;
+                }
+                let mut entries: Vec<&registry::Entry> = reg.entries.values().filter(|e| e.key.kind == kind).collect();
+                entries.sort_by(|a, b| a.name.cmp(&b.name));
+                for e in entries {
+                    out.push(DisplayRow::Element { key: e.key.clone(), name: e.name.clone(), seen_in: e.seen_in, depth: 3 });
+                }
+            }
+        }
+        out
     }
 
-    pub fn selected_row(&self) -> Option<Row> {
-        self.rows().into_iter().nth(self.sel)
+    pub fn selected(&self, registry: Option<&registry::Registry>) -> Option<DisplayRow> {
+        self.display_rows(registry).into_iter().nth(self.sel)
     }
 
     /// The folder a new diagram or folder lands in, or `p` puts something into — the row
-    /// under the cursor if it is a folder, that row's own parent if it is a diagram, the root
-    /// if there is no selection at all.
-    pub fn current_dir(&self) -> Option<PathBuf> {
-        match self.selected_row() {
-            Some(Row { kind: RowKind::Folder { .. }, path, .. }) => Some(path),
-            Some(Row { kind: RowKind::Diagram, path, .. }) => path.parent().map(PathBuf::from),
-            None => self.root.clone(),
+    /// under the cursor if it is a folder, that row's own parent if it is a diagram, the
+    /// root otherwise (nothing selected, or standing in the virtual elements section, which
+    /// has no folder of its own).
+    pub fn current_dir(&self, registry: Option<&registry::Registry>) -> Option<PathBuf> {
+        match self.selected(registry) {
+            Some(DisplayRow::Fs(Row { kind: RowKind::Folder { .. }, path, .. })) => Some(path),
+            Some(DisplayRow::Fs(Row { kind: RowKind::Diagram, path, .. })) => path.parent().map(PathBuf::from),
+            _ => self.root.clone(),
         }
     }
 
@@ -90,6 +147,16 @@ impl State {
 
     pub fn expand(&mut self, path: &std::path::Path) {
         self.expanded.insert(path.to_path_buf());
+    }
+
+    pub fn toggle_group(&mut self, id: GroupId) {
+        if !self.groups_expanded.remove(&id) {
+            self.groups_expanded.insert(id);
+        }
+    }
+
+    pub fn expand_group(&mut self, id: GroupId) {
+        self.groups_expanded.insert(id);
     }
 
     pub fn move_by(&mut self, delta: isize, n: usize) {
@@ -123,6 +190,18 @@ impl Row {
     }
 }
 
+/// One row of the combined list `State::display_rows` builds — a real filesystem row, or one
+/// of the virtual "elements" section's rows. Kept separate from `Row` rather than folded into
+/// it: `Row` is real-`PathBuf`-shaped, and every filesystem operation (`n`/`N`/`r`/`m`/`d`)
+/// takes a `Row`'s own `entry()` — a `Group`/`Element` row has no path to give it.
+pub enum DisplayRow {
+    Fs(Row),
+    /// A non-interactive divider between the folder tree and the elements section.
+    Heading,
+    Group { id: GroupId, label: String, depth: usize, expanded: bool },
+    Element { key: registry::Key, name: String, seen_in: usize, depth: usize },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowKind {
     Folder { expanded: bool },
@@ -154,6 +233,8 @@ fn walk(nodes: &[wb::Node], depth: usize, expanded: &HashSet<PathBuf>, out: &mut
 
 pub struct Browser<'a> {
     pub state: &'a State,
+    /// `App`'s own field, not the panel's — see `State::rescan`'s doc comment.
+    pub registry: Option<&'a registry::Registry>,
 }
 
 impl Widget for Browser<'_> {
@@ -189,33 +270,53 @@ impl Widget for Browser<'_> {
             return;
         }
 
-        let all = s.rows();
+        let all = s.display_rows(self.registry);
         if all.is_empty() && s.editing.is_none() {
             lines.push(Line::styled(" empty — n adds a diagram, N a folder", Style::new().fg(theme::t().dim)));
         }
         for (i, row) in all.iter().enumerate() {
             let on = i == s.sel;
-            let grabbed = s.grabbed.as_ref().is_some_and(|g| g.path == row.path);
-            let indent = "  ".repeat(row.depth);
-            let glyph = match row.kind {
-                RowKind::Folder { expanded: true } => "▾",
-                RowKind::Folder { expanded: false } => "▸",
-                RowKind::Diagram => "▪",
-            };
-            let text = match (&s.editing, on) {
-                (Some((Typing::Rename, t)), true) => format!(" {indent}{glyph} {t}█"),
-                _ => format!(" {indent}{glyph} {}", row.name),
-            };
-            let base = match row.kind {
-                RowKind::Folder { .. } => theme::t().yellow,
-                RowKind::Diagram => theme::t().ink,
-            };
-            let style = match (on, grabbed) {
-                (true, _) => Style::new().fg(theme::t().inverse).bg(theme::t().aqua).bold(),
-                (false, true) => Style::new().fg(theme::t().green).italic(),
-                (false, false) => Style::new().fg(base),
-            };
-            lines.push(Line::styled(fit(&text, body.width as usize), style));
+            match row {
+                DisplayRow::Fs(row) => {
+                    let grabbed = s.grabbed.as_ref().is_some_and(|g| g.path == row.path);
+                    let indent = "  ".repeat(row.depth);
+                    let glyph = match row.kind {
+                        RowKind::Folder { expanded: true } => "▾",
+                        RowKind::Folder { expanded: false } => "▸",
+                        RowKind::Diagram => "▪",
+                    };
+                    let text = match (&s.editing, on) {
+                        (Some((Typing::Rename, t)), true) => format!(" {indent}{glyph} {t}█"),
+                        _ => format!(" {indent}{glyph} {}", row.name),
+                    };
+                    let base = match row.kind {
+                        RowKind::Folder { .. } => theme::t().yellow,
+                        RowKind::Diagram => theme::t().ink,
+                    };
+                    let style = match (on, grabbed) {
+                        (true, _) => Style::new().fg(theme::t().inverse).bg(theme::t().aqua).bold(),
+                        (false, true) => Style::new().fg(theme::t().green).italic(),
+                        (false, false) => Style::new().fg(base),
+                    };
+                    lines.push(Line::styled(fit(&text, body.width as usize), style));
+                }
+                DisplayRow::Heading => {
+                    lines.push(Line::styled(fit(" ──────────", body.width as usize), Style::new().fg(theme::t().dim)));
+                }
+                DisplayRow::Group { label, depth, expanded, .. } => {
+                    let indent = "  ".repeat(*depth);
+                    let glyph = if *expanded { "▾" } else { "▸" };
+                    let text = format!(" {indent}{glyph} {label}");
+                    let style = if on { Style::new().fg(theme::t().inverse).bg(theme::t().aqua).bold() } else { Style::new().fg(theme::t().yellow) };
+                    lines.push(Line::styled(fit(&text, body.width as usize), style));
+                }
+                DisplayRow::Element { name, depth, seen_in, .. } => {
+                    let indent = "  ".repeat(*depth);
+                    let text = if *seen_in > 1 { format!(" {indent}◆ {name} ({seen_in})") } else { format!(" {indent}◆ {name}") };
+                    let style = if on { Style::new().fg(theme::t().inverse).bg(theme::t().aqua).bold() } else { Style::new().fg(theme::t().ink) };
+                    lines.push(Line::styled(fit(&text, body.width as usize), style));
+                }
+            }
         }
         if let Some((Typing::NewDiagram | Typing::NewFolder, t)) = &s.editing {
             lines.push(Line::styled(format!(" new: {t}█"), Style::new().fg(theme::t().green).bold()));
@@ -263,11 +364,11 @@ mod tests {
         let mut st = State::opened(PathBuf::from("/root"));
         st.nodes = sample();
         st.sel = 0;
-        assert_eq!(st.current_dir(), Some(PathBuf::from("/root/Billing")), "a folder row: itself");
+        assert_eq!(st.current_dir(None), Some(PathBuf::from("/root/Billing")), "a folder row: itself");
         st.sel = 1;
-        assert_eq!(st.current_dir(), Some(PathBuf::from("/root")), "a diagram row: its own parent");
+        assert_eq!(st.current_dir(None), Some(PathBuf::from("/root")), "a diagram row: its own parent");
         st.nodes = Vec::new();
-        assert_eq!(st.current_dir(), Some(PathBuf::from("/root")), "nothing selected: the root");
+        assert_eq!(st.current_dir(None), Some(PathBuf::from("/root")), "nothing selected: the root");
     }
 
     #[test]

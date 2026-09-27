@@ -476,6 +476,15 @@ impl Edge {
     }
 }
 
+/// One object type, interface or action type this export defines, read back out for a
+/// conflict check — see `Index::defined`.
+pub struct Defined {
+    pub kind: ShapeKind,
+    pub api_name: String,
+    pub display_name: String,
+    pub properties: Vec<Property>,
+}
+
 /// The whole export, parsed once and kept — never drawn in full. `:tree` walks its resources
 /// by group; `e` walks its edges from whichever one is already on the diagram.
 pub struct Index {
@@ -597,6 +606,21 @@ impl Index {
         self.actions.get(id)
     }
 
+    /// Every object type, interface and action type this export defines — kind, api_name,
+    /// display name, and its properties already converted to this app's own `Property` — so
+    /// a workbench's registry can check for a conflict against what it already knows without
+    /// this module's own `Raw*` types ever leaving it.
+    pub fn defined(&self) -> Vec<Defined> {
+        let mut out: Vec<Defined> = self
+            .object_types
+            .values()
+            .map(|o| Defined { kind: ShapeKind::ObjectType, api_name: o.api_name.clone(), display_name: o.display_name.clone(), properties: properties_from(&o.properties, &o.primary_keys, &o.title) })
+            .collect();
+        out.extend(self.interfaces.values().map(|i| Defined { kind: ShapeKind::Interface, api_name: i.api_name.clone(), display_name: i.display_name.clone(), properties: properties_from(&i.properties, &[], &None) }));
+        out.extend(self.actions.values().map(|a| Defined { kind: ShapeKind::ActionType, api_name: a.api_name.clone(), display_name: a.display_name.clone(), properties: properties_from_parameters(&a.parameters) }));
+        out
+    }
+
     /// The kind a resource id names, for a row that has not been placed yet — an object
     /// type, an interface or an action are named in the export; anything else is an opaque
     /// id an edge points at (a function's, from `Calls`; a datasource's, from `BackedBy`),
@@ -710,9 +734,11 @@ fn build_edges(object_types: &HashMap<String, RawObjectType>, interfaces: &HashM
 
 // ─── placing one resource on a document ────────────────────────────────────
 
-fn add_properties(doc: &mut Document, id: ElementId, props: &[RawProperty], primary_keys: &[String], title: &Option<String>) {
-    let el = doc.element_mut(id).expect("just added");
-    el.properties = props
+/// A property's own conversion, factored out of `add_object_type`/`add_interface` so
+/// `Index::defined` can build the same `Property`s for a conflict check without ever placing
+/// anything on a `Document` — the one place Foundry's property shape becomes this app's.
+fn properties_from(props: &[RawProperty], primary_keys: &[String], title: &Option<String>) -> Vec<Property> {
+    props
         .iter()
         .map(|p| Property {
             name: p.display_name.clone(),
@@ -727,34 +753,13 @@ fn add_properties(doc: &mut Document, id: ElementId, props: &[RawProperty], prim
             status: p.status,
             description: None,
         })
-        .collect();
+        .collect()
 }
 
-pub(crate) fn add_object_type(doc: &mut Document, o: &RawObjectType) -> ElementId {
-    let id = doc.add(ShapeKind::ObjectType, o.display_name.clone(), 0.0, 0.0);
-    add_properties(doc, id, &o.properties, &o.primary_keys, &o.title);
-    let el = doc.element_mut(id).expect("just added");
-    el.api_name = Some(o.api_name.clone());
-    el.plural = o.plural.clone();
-    el.status = o.status;
-    el.visibility = o.visibility;
-    id
-}
-
-pub(crate) fn add_interface(doc: &mut Document, i: &RawInterface) -> ElementId {
-    let id = doc.add(ShapeKind::Interface, i.display_name.clone(), 0.0, 0.0);
-    add_properties(doc, id, &i.properties, &[], &None);
-    let el = doc.element_mut(id).expect("just added");
-    el.api_name = Some(i.api_name.clone());
-    el.status = i.status;
-    id
-}
-
-pub(crate) fn add_action_type(doc: &mut Document, a: &RawActionType) -> ElementId {
-    let id = doc.add(ShapeKind::ActionType, a.display_name.clone(), 0.0, 0.0);
-    let el = doc.element_mut(id).expect("just added");
-    el.properties = a
-        .parameters
+/// An action type's parameters, the same idea as `properties_from` for an object type's
+/// properties — this app has one row shape for both.
+fn properties_from_parameters(params: &[RawParameter]) -> Vec<Property> {
+    params
         .iter()
         .map(|p| Property {
             name: p.display_name.clone(),
@@ -769,7 +774,33 @@ pub(crate) fn add_action_type(doc: &mut Document, a: &RawActionType) -> ElementI
             status: Status::Active,
             description: None,
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn add_object_type(doc: &mut Document, o: &RawObjectType) -> ElementId {
+    let id = doc.add(ShapeKind::ObjectType, o.display_name.clone(), 0.0, 0.0);
+    let el = doc.element_mut(id).expect("just added");
+    el.properties = properties_from(&o.properties, &o.primary_keys, &o.title);
+    el.api_name = Some(o.api_name.clone());
+    el.plural = o.plural.clone();
+    el.status = o.status;
+    el.visibility = o.visibility;
+    id
+}
+
+pub(crate) fn add_interface(doc: &mut Document, i: &RawInterface) -> ElementId {
+    let id = doc.add(ShapeKind::Interface, i.display_name.clone(), 0.0, 0.0);
+    let el = doc.element_mut(id).expect("just added");
+    el.properties = properties_from(&i.properties, &[], &None);
+    el.api_name = Some(i.api_name.clone());
+    el.status = i.status;
+    id
+}
+
+pub(crate) fn add_action_type(doc: &mut Document, a: &RawActionType) -> ElementId {
+    let id = doc.add(ShapeKind::ActionType, a.display_name.clone(), 0.0, 0.0);
+    let el = doc.element_mut(id).expect("just added");
+    el.properties = properties_from_parameters(&a.parameters);
     el.api_name = Some(a.api_name.clone());
     el.status = a.status;
     id

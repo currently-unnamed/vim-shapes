@@ -312,6 +312,7 @@ fn build_pages() -> Vec<Page> {
              |rules|        the lessons, in words\n\
              |files|        saving, opening, exporting\n\
              |workbench|    a folder of diagrams, docked on the left, kept in sync with disk\n\
+             |conflicts|    when a fresh ontology import disagrees with a workbench\n\
              |render|       the diagram as a picture\n\
              |palette|      the ten colours\n\
              |ontology-kind| the ontology layer: object types, properties, links, actions\n\
@@ -714,7 +715,7 @@ fn build_pages() -> Vec<Page> {
              >  gt  gT                the next / previous tab\n\
              >  :tab N                go to tab N\n\
              >  :tabs                 list them\n\
-             >  :tabclose             close this tab; asks if its diagram is unsaved\n\
+             >  ^w  :tabclose         close this tab; asks if its diagram is unsaved\n\
              \n\
              A workspace with hundreds of tabs — what a large coArchi import turns into — is\n\
              not something gt or a remembered number reaches. See |tree|.\n\
@@ -780,7 +781,8 @@ fn build_pages() -> Vec<Page> {
             "files",
             "*files*  saving, opening, exporting\n\
              \n\
-             >  :w [path]         save — to the file opened, or the path given\n\
+             >  :w [path]         save — to the file opened, or the path given (or, on a tab\n\
+             >                    the |workbench| opened, straight back to its own file)\n\
              >  :o <path>         open\n\
              >  :import <path>    a draw.io file, an ArchiMate exchange file, a coArchi folder, or a Foundry ontology export\n\
              >  :n                start an empty diagram\n\
@@ -882,22 +884,33 @@ fn build_pages() -> Vec<Page> {
              actively building, not a grouping derived from what happens to be inside it.\n\
              \n\
              A person may keep more than one — a personal folder and a team one — so bare\n\
-             :workbench toggles the panel if one is already open, and otherwise offers every\n\
-             folder ever opened, most-recently-accessed first. :wb is the short alias, and\n\
-             the |intro| start dialog offers the same list of remembered folders as its own\n\
+             :workbench (or W, from the diagram) toggles the panel if one is already open.\n\
+             One session, one workbench though: closing it this way only hides the panel, so\n\
+             the next bare :workbench or W returns straight to the same folder, not a\n\
+             question. Only a session that has never opened one at all falls back to every\n\
+             folder ever opened before, most-recently-accessed first. :wb is the short\n\
+             alias, and the |intro| start dialog offers that same remembered list as its own\n\
              third choice, for opening straight into one without a diagram in the way first.\n\
              \n\
              One row is one workspace file — this app's own format, exactly what :w writes —\n\
              so a row can hold a whole family of related diagrams, not just one. Picking one\n\
-             adds every tab in it to what is already open; the workbench stays up so browsing\n\
-             continues. Nothing here replaces the tabs you already have, so — unlike :open —\n\
-             it never needs to ask about unsaved work first.\n\
+             adds every tab in it to what is already open, landing on whichever was current\n\
+             when it was saved, and closes the panel — go look at what you opened. Nothing\n\
+             here replaces the tabs you already have, so — unlike :open — it never needs to\n\
+             ask about unsaved work first. Either way, every tab opened this way remembers\n\
+             which file it came from, so a bare :w on it saves straight back there — no path\n\
+             to type — carrying its whole family of sibling tabs back into that same file\n\
+             with it, not just the one you are looking at.\n\
+             \n\
+             n makes a fresh diagram and puts you straight into it the same way — panel\n\
+             closed, cursor in it, ready to draw — rather than leaving you to find and open\n\
+             its row yourself.\n\
              \n\
              >  j / k          move the selection\n\
              >  enter          open a folder's diagram as new tabs; on a folder, fold/unfold\n\
              >  → / ←          unfold / fold a folder\n\
-             >  n / N          a new diagram / a new folder, in whichever folder is under the\n\
-             >                 cursor (or beside it, standing on a diagram)\n\
+             >  n / N          a new diagram, opened right away / a new folder, in whichever\n\
+             >                 folder is under the cursor (or beside it, standing on a diagram)\n\
              >  r              rename the row under the cursor\n\
              >  m              grab the row under the cursor to move it\n\
              >  p              put whatever m grabbed into the folder under the cursor now\n\
@@ -905,8 +918,52 @@ fn build_pages() -> Vec<Page> {
              >  d              delete — a real rm, so the app asks first\n\
              >  esc / q        close the panel\n\
              \n\
-             On a terminal too narrow for both this and :sheet's own dock on the right, the\n\
-             workbench gives way and floats over the diagram instead of holding its column.\n"
+             Unlike :sheet's own dock on the right, this one never floats — it always holds\n\
+             its column, clamped rather than hidden on a narrow terminal, since it is a\n\
+             folder you are working against, not a momentary editor.\n\
+             \n\
+             # elements — every distinct thing, once\n\
+             \n\
+             Below the real folders and files, a second section — elements — is compiled\n\
+             fresh every time the workbench opens or rescans: every diagram under the root\n\
+             is read, and every element in every one of them is folded into a single list,\n\
+             one row per distinct thing, grouped by layer then kind, the way Archi's own\n\
+             model tree holds an element once regardless of how many views place it. Two\n\
+             elements are the same row if they share an API name (anything a Foundry import\n\
+             carries one for) or, failing that, a label — always within the same kind, so an\n\
+             object type and an actor named the same thing never fold into one. A count in\n\
+             parentheses after a name means more than one diagram draws it — worth checking\n\
+             by hand for drift, since this app resolves that silently (the richest sighting's\n\
+             own properties win) rather than asking; only a fresh ontology :import disagreeing\n\
+             with what is already known asks (see |ontology-kind|, and the paragraph below).\n\
+             \n\
+             enter on an element places it onto the diagram you already have open — not a\n\
+             fresh tab — and closes the panel, since placing one is go-edit-it-now; e\n\
+             (expand) from there offers every real relation that element has in *any*\n\
+             diagram under the root, the same way expanding a Foundry resource does. n/N/r/m/d\n\
+             are refused here — an element is read from the diagrams themselves, so it is\n\
+             edited by opening the one it actually lives in, not from this list.\n"
+                .to_string(),
+        ),
+        page(
+            "conflicts",
+            "*conflicts*  when a fresh ontology disagrees with a workbench\n\
+             \n\
+             The |workbench|'s own elements section remembers every object type,\n\
+             interface and action type it has read, by API name. Importing a fresh Foundry\n\
+             ontology export while one is open checks every type the export defines against\n\
+             that memory — a type new to the workbench is just added, no question asked, but\n\
+             one whose properties came back different from what is already known opens this\n\
+             dialog, one conflict at a time, existing on the left, incoming on the right, a\n\
+             changed row marked ~, an added one +, a removed one -.\n\
+             \n\
+             >  k / i          keep the workbench's own definition / take the import's\n\
+             >  K / I          the same, but for every conflict still left, all at once\n\
+             >  esc / q        stop — whatever is left defaults to keep\n\
+             \n\
+             Resolving one only changes the workbench's own memory of that type, in this\n\
+             session — like the |files| tree and the resident ontology it comes from, this is\n\
+             never written back to a file, so no diagram that disagrees is silently rewritten.\n"
                 .to_string(),
         ),
     ];

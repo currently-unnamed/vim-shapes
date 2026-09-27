@@ -15,6 +15,7 @@ pub mod debug;
 pub mod excmd;
 pub mod expandpick;
 pub mod exportdlg;
+pub mod conflictpick;
 pub mod form;
 pub mod help;
 pub mod importdlg;
@@ -35,7 +36,7 @@ pub mod wire;
 pub mod workbench;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::prelude::*;
@@ -174,11 +175,14 @@ enum MouseGesture {
 const HANDLE_HIT: f64 = 0.75;
 /// How close a click has to land on a relation's route to focus it rather than miss it.
 const RELATION_HIT: f64 = 0.6;
-/// How far a hover arrow sits outside its handle — far enough that the two hit-zones
-/// (`HANDLE_HIT` around the handle, `ARROW_HIT` around the arrow) never overlap, so a click
-/// is never ambiguous between "resize" and "open a new connected shape this way."
+/// How far a hover arrow is drawn outside its handle — purely a rendering distance now,
+/// since hovering and clicking one are decided by `ARROW_MARGIN`'s region, not by distance
+/// to this point; kept clear of `HANDLE_HIT`'s own reach so a resize handle and an arrow are
+/// never drawn on top of each other.
 const ARROW_GAP: f64 = 1.6;
-const ARROW_HIT: f64 = 0.7;
+/// How far around a shape's own box the hover-arrow gutter reaches — a region, not a radius
+/// around each arrow: see `Element::arrow_region`.
+const ARROW_MARGIN: f64 = 3.0;
 
 /// A tab that is not the current one: its name, and everything about it that the app keeps
 /// per diagram, parked until you switch back. The current tab's state lives in `App`'s own
@@ -200,6 +204,13 @@ struct TabSlot {
     /// far it has already grown. A hand-drawn element, or one from any other import, simply
     /// has no entry.
     ontology_ids: HashMap<ElementId, String>,
+    /// The workbench file this tab (and every other tab loaded alongside it, if it came
+    /// from a multi-tab file) was opened from, if any — how a second `Enter` on the same
+    /// workbench row finds the whole family already open and switches to it, by the file's
+    /// real path, rather than by a tab's own name (fragile: a file's first tab can carry any
+    /// name at all, including the generic "diagram 1" every fresh session already starts
+    /// with — matching on that name alone is exactly the bug this field replaces).
+    source: Option<PathBuf>,
 }
 
 pub struct App {
@@ -266,6 +277,18 @@ pub struct App {
     /// The architecture workbench — a live folder of diagrams, docked on the left, while one
     /// is up. Never saved: it is a window onto a folder, not part of any one diagram.
     workbench: Option<workbench::State>,
+    /// Every distinct element across every diagram the open workbench's folder holds,
+    /// compiled once when it opens and again after every rescan — kept here, not on
+    /// `workbench::State`, because placing an element closes the panel right before `e`
+    /// (expand) needs this to still be resident, the same way `self.ontology` outlives
+    /// whatever browsed it in.
+    registry: Option<crate::registry::Registry>,
+    /// The workbench this session is in, if any — set once by `open_workbench` and never
+    /// cleared by closing the panel, only by opening a *different* one. One session, one
+    /// workbench: closing and reopening the panel (bare `:workbench`) returns to this one
+    /// directly, rather than asking again or falling back to the config's cross-session
+    /// recents list, which is for a session that has not opened one yet at all.
+    workbench_root: Option<PathBuf>,
     /// The colour picker, over the sheet, while one is up.
     colour: Option<colour::State>,
     /// Colours picked this session, newest first — the picker's recent row.
@@ -275,6 +298,9 @@ pub struct App {
     importdlg: Option<importdlg::State>,
     /// `e` (expand) — up while its list is showing.
     expandpick: Option<expandpick::State>,
+    /// Up after a `:import` that redefines an object type, interface or action type the
+    /// open workbench's registry already knew differently — one conflict at a time.
+    conflictpick: Option<conflictpick::State>,
     /// The right-click menu — up from an idle right-click until a row runs, or esc.
     ctxmenu: Option<ctxmenu::State>,
     confirm: Option<Confirm>,
@@ -377,6 +403,8 @@ impl App {
             tree: None,
             props: None,
             workbench: None,
+            registry: None,
+            workbench_root: None,
             colour: None,
             recent_colours: Vec::new(),
             enhanced_keys: false,
@@ -386,6 +414,7 @@ impl App {
             export: None,
             importdlg: None,
             expandpick: None,
+            conflictpick: None,
             ctxmenu: None,
             confirm: None,
             status: None,
@@ -567,29 +596,52 @@ impl App {
         if let Some(&existing) = self.ontology_ids.iter().find(|(_, raw)| raw.as_str() == other_id).map(|(el, _)| el) {
             return existing;
         }
-        let Some(index) = &self.ontology else { unreachable!("expand only runs with an ontology resident") };
-        let new_id = if let Some(o) = index.object_type(other_id) {
-            crate::foundry_import::add_object_type(&mut self.doc, o)
-        } else if let Some(i) = index.interface(other_id) {
-            crate::foundry_import::add_interface(&mut self.doc, i)
-        } else if let Some(a) = index.action(other_id) {
-            crate::foundry_import::add_action_type(&mut self.doc, a)
-        } else if via == RelationKind::Calls {
-            crate::foundry_import::add_function(&mut self.doc, other_id)
+        let new_id = if let Some(index) = &self.ontology {
+            if let Some(o) = index.object_type(other_id) {
+                crate::foundry_import::add_object_type(&mut self.doc, o)
+            } else if let Some(i) = index.interface(other_id) {
+                crate::foundry_import::add_interface(&mut self.doc, i)
+            } else if let Some(a) = index.action(other_id) {
+                crate::foundry_import::add_action_type(&mut self.doc, a)
+            } else if via == RelationKind::Calls {
+                crate::foundry_import::add_function(&mut self.doc, other_id)
+            } else {
+                crate::foundry_import::add_datasource(&mut self.doc, other_id)
+            }
+        } else if let Some(entry) = self.registry.as_ref().and_then(|r| r.by_token(other_id)).cloned() {
+            crate::registry::Registry::place(&mut self.doc, &entry)
         } else {
-            crate::foundry_import::add_datasource(&mut self.doc, other_id)
+            unreachable!("expand only runs with an ontology or a registry resident")
         };
         self.ontology_ids.insert(new_id, other_id.to_string());
         new_id
     }
 
-    /// `e` — expand: every real connection `source` has in the ontology that is not already
-    /// on this tab. `Vec::new()` if `source` was never placed from the index, or has none
-    /// left — `Where::can_expand` already refused the key in that case.
+    /// A registry `Element` row picked in the workbench: placed onto the *current* diagram
+    /// (not a fresh tab, unlike picking a whole Foundry resource) — "import that specific
+    /// shape kind already referenced" reads as bringing it into what is already open, and
+    /// `e` (expand) offers its real cross-file relationships from there, same as a Foundry
+    /// resource's `ontology_ids` token does.
+    fn place_registry_resource(&mut self, key: &crate::registry::Key) {
+        let Some(entry) = self.registry.as_ref().and_then(|r| r.by_token(&key.token())).cloned() else { return };
+        self.checkpoint();
+        let new_id = crate::registry::Registry::place(&mut self.doc, &entry);
+        self.ontology_ids.insert(new_id, key.token());
+        self.cursor = Some(new_id);
+        self.say(format!("{} — e to expand what it connects to", entry.name), Tone::Good);
+    }
+
+    /// `e` — expand: every real connection `source` has in the ontology, or the workbench's
+    /// registry, that is not already on this tab. `Vec::new()` if `source` was never placed
+    /// from either, or has none left — `Where::can_expand` already refused the key in that
+    /// case.
     fn ontology_connections(&self, source: ElementId) -> Vec<crate::foundry_import::Edge> {
-        let (Some(raw_id), Some(index)) = (self.ontology_ids.get(&source), &self.ontology) else { return Vec::new() };
+        let Some(raw_id) = self.ontology_ids.get(&source) else { return Vec::new() };
         let placed: std::collections::HashSet<&str> = self.ontology_ids.values().map(String::as_str).collect();
-        index.connections(raw_id, &placed).into_iter().cloned().collect()
+        if let Some(index) = &self.ontology {
+            return index.connections(raw_id, &placed).into_iter().cloned().collect();
+        }
+        self.registry.as_ref().map(|r| r.connections(raw_id, &placed)).unwrap_or_default()
     }
 
     /// The link a foreign-key row in the property browser backs, if any — `e` there expands
@@ -663,15 +715,21 @@ impl App {
     fn open_expand(&mut self) {
         let Some(source) = self.cursor else { return };
         let edges = self.ontology_connections(source);
-        let Some(index) = &self.ontology else { return };
         let source_raw = self.ontology_ids.get(&source).cloned().unwrap_or_default();
+        // Tried in the same order `ontology_connections`/`place_ontology_connection` already
+        // do: the resident Foundry import first, the workbench's registry otherwise.
+        let kind_and_name = |id: &str, via: RelationKind| -> Option<(ShapeKind, String)> {
+            if let Some(index) = &self.ontology {
+                return Some((index.kind_of(id, via), index.display_name(id, via)));
+            }
+            self.registry.as_ref().and_then(|r| r.by_token(id)).map(|e| (e.key.kind, e.name.clone()))
+        };
         let rows: Vec<expandpick::Row> = edges
             .into_iter()
-            .map(|edge| {
+            .filter_map(|edge| {
                 let other = if edge.from == source_raw { &edge.to } else { &edge.from };
-                let other_kind = index.kind_of(other, edge.kind);
-                let other_label = index.display_name(other, edge.kind);
-                expandpick::Row { edge, other_kind, other_label }
+                let (other_kind, other_label) = kind_and_name(other, edge.kind)?;
+                Some(expandpick::Row { edge, other_kind, other_label })
             })
             .collect();
         self.expandpick = Some(expandpick::State::new(rows));
@@ -691,6 +749,17 @@ impl App {
             self.tab -= 1;
         }
         self.say(format!("closed {name}"), Tone::Note);
+    }
+
+    /// `:tabclose` (`:tc`) and the direct `^w` key both land here — asks first unless there
+    /// is nothing on this tab worth losing, so the one rule stays in one place rather than
+    /// the ex-command and the key each deciding it their own way.
+    fn tabclose_key(&mut self) {
+        if self.tabs.len() > 1 && !self.doc.elements.is_empty() && self.dirty() {
+            self.confirm = Some(Confirm::CloseTab);
+        } else {
+            self.close_tab();
+        }
     }
 
     // ─── the document ───────────────────────────────────────────────────────
@@ -748,6 +817,12 @@ impl App {
         self.say(format!("imported {}", path.display()), Tone::Good);
         if open_tree {
             self.tree = Some(tree::State::new());
+        }
+        if let (Some(index), Some(reg)) = (&self.ontology, &self.registry) {
+            let conflicts = reg.conflicts_with(index);
+            if !conflicts.is_empty() {
+                self.conflictpick = Some(conflictpick::State::new(conflicts));
+            }
         }
         Ok(())
     }
@@ -1943,6 +2018,37 @@ impl App {
             }
             return;
         }
+        if let Some(st) = &mut self.conflictpick {
+            match st.key(k) {
+                conflictpick::Outcome::Nothing => {}
+                conflictpick::Outcome::Resolve { take_incoming } => {
+                    if let Some(c) = st.current().cloned() {
+                        if take_incoming && let Some(reg) = &mut self.registry {
+                            reg.apply_incoming(&c.key, c.incoming);
+                        }
+                        st.advance();
+                    }
+                    if st.current().is_none() {
+                        self.conflictpick = None;
+                        self.say("conflicts resolved", Tone::Note);
+                    }
+                }
+                conflictpick::Outcome::ResolveAll { take_incoming } => {
+                    if take_incoming {
+                        let remaining = st.conflicts[st.i..].to_vec();
+                        if let Some(reg) = &mut self.registry {
+                            for c in remaining {
+                                reg.apply_incoming(&c.key, c.incoming);
+                            }
+                        }
+                    }
+                    self.conflictpick = None;
+                    self.say("conflicts resolved", Tone::Note);
+                }
+                conflictpick::Outcome::Done => self.conflictpick = None,
+            }
+            return;
+        }
         if let Some(st) = &mut self.expandpick {
             let outcome = st.key(k);
             let rows: Vec<crate::foundry_import::Edge> = st.rows.iter().map(|r| r.edge.clone()).collect();
@@ -2187,6 +2293,8 @@ impl App {
             (Some(Prefix::G), KeyCode::Char('t')) => self.switch_tab((self.tab + 1) % self.tabs.len()),
             (Some(Prefix::G), KeyCode::Char('T')) => self.switch_tab((self.tab + self.tabs.len() - 1) % self.tabs.len()),
             (_, KeyCode::Char('t')) if ctrl => self.tabpick = Some(tabpick::State::new()),
+            (_, KeyCode::Char('w')) if ctrl => self.tabclose_key(),
+            (_, KeyCode::Char('W')) => self.toggle_workbench(),
             (Some(Prefix::Z), KeyCode::Char('Z')) => self.run_excmd("wq".into()),
             (Some(Prefix::Z), KeyCode::Char('Q')) => self.run_excmd("q!".into()),
             (Some(Prefix::Zz), KeyCode::Char('z')) => self.center_camera(),
@@ -2392,7 +2500,7 @@ impl App {
     fn hit_arrow(&self, p: (f64, f64)) -> Option<(ElementId, usize)> {
         let id = self.hover?;
         let e = self.doc.element(id)?;
-        e.arrow_at(p, ARROW_HIT, ARROW_GAP).map(|d| (id, d))
+        e.arrow_region(p, ARROW_MARGIN).map(|d| (id, d))
     }
 
     /// The handle of the frontmost element under a point, if the point is close enough to
@@ -2441,6 +2549,7 @@ impl App {
             && self.export.is_none()
             && self.importdlg.is_none()
             && self.expandpick.is_none()
+            && self.conflictpick.is_none()
             && self.ctxmenu.is_none()
             && self.cmdline.is_none()
             && self.confirm.is_none()
@@ -2475,7 +2584,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Right) => self.mouse_right_down(p, (m.column, m.row)),
             MouseEventKind::Drag(MouseButton::Right) => self.mouse_right_drag(p, (m.column, m.row)),
             MouseEventKind::Up(MouseButton::Right) => self.mouse_right_up(p),
-            MouseEventKind::Moved => self.hover = self.doc.element_near(p, ARROW_HIT, ARROW_GAP),
+            MouseEventKind::Moved => self.hover = self.doc.element_near(p, ARROW_MARGIN),
             MouseEventKind::ScrollUp => self.pan(0.0, -PAN_Y),
             MouseEventKind::ScrollDown => self.pan(0.0, PAN_Y),
             MouseEventKind::ScrollLeft => self.pan(-PAN_X, 0.0),
@@ -2489,8 +2598,9 @@ impl App {
     fn mouse_left_down(&mut self, p: (f64, f64)) {
         self.status = None;
         self.mouse_dragging = false;
-        // Checked before `hit_handle`: an arrow sits `ARROW_GAP` outside its handle, so the
-        // two never overlap, but the arrow is the one meant first when hovering shows both.
+        // Checked before `hit_handle`: `arrow_region` only answers outside the box itself,
+        // a handle only inside it (through `element_at`), so the two never compete for the
+        // same point — this is just which one to ask first.
         if let Some((id, dir)) = self.hit_arrow(p) {
             self.set_cursor(id);
             self.open_off(Some(dir));
@@ -2833,15 +2943,59 @@ impl App {
     /// folder is a normal case, not an error), remember it in the config as just accessed,
     /// and open the panel on it.
     fn open_workbench(&mut self, path: PathBuf) {
+        if path.is_file() {
+            self.say(format!("{} is a file — :workbench wants a folder; :open it instead, or :workbench its parent folder", path.display()), Tone::Bad);
+            return;
+        }
         if let Err(e) = std::fs::create_dir_all(&path) {
             self.say(format!("{}: {e}", path.display()), Tone::Bad);
             return;
         }
+        // Resolved to an absolute path now that it is guaranteed to exist — `:workbench .`
+        // (or any other relative path) would otherwise be remembered literally, and a "."
+        // means something different every time the app's working directory does.
+        let path = path.canonicalize().unwrap_or(path);
         self.workbench = Some(workbench::State::opened(path.clone()));
+        self.registry = Some(crate::registry::build(&path));
+        self.workbench_root = Some(path.clone());
         match crate::config::touch_workbench(&path) {
             Ok(()) => self.say(format!("workbench: {}", path.display()), Tone::Good),
             Err(e) => self.say(format!("workbench: {} — not remembered: {e}", path.display()), Tone::Note),
         }
+    }
+
+    /// `W` and bare `:workbench` both land here — closes the panel if it is already open
+    /// (`workbench_root` stays, so the next call returns straight to it rather than asking
+    /// again); otherwise opens this session's own workbench directly if it already has one,
+    /// or — the first time this session — offers every folder ever opened before, most
+    /// recently accessed first.
+    fn toggle_workbench(&mut self) {
+        if self.workbench.is_some() {
+            self.workbench = None;
+        } else if let Some(root) = self.workbench_root.clone() {
+            self.open_workbench(root);
+        } else {
+            let recents: Vec<PathBuf> = crate::config::load().workbenches.into_iter().map(PathBuf::from).collect();
+            if recents.is_empty() {
+                self.say("usage: :workbench <path> — no workbench opened before to pick from", Tone::Bad);
+            } else {
+                self.workbench = Some(workbench::State::recents(recents));
+            }
+        }
+    }
+
+    /// Re-reads the workbench's own folder tree and recompiles `self.registry` from it —
+    /// after every create, rename, move or delete. A no-op with no workbench open.
+    fn rescan_workbench(&mut self) {
+        // `workbench_root`, not `self.workbench.as_ref()...root` — the panel is closed for
+        // most of a session (opening a diagram from it closes it), and the registry has to
+        // stay current anyway: reading it from the panel's own state made this silently
+        // do nothing the moment the panel was not on screen, which is the common case.
+        let Some(root) = self.workbench_root.clone() else { return };
+        if let Some(st) = &mut self.workbench {
+            st.rescan();
+        }
+        self.registry = Some(crate::registry::build(&root));
     }
 
     /// A diagram row picked in the workbench: every tab in that file, appended — not just
@@ -2850,29 +3004,36 @@ impl App {
     /// same as `tabnew_from_path`, so unlike `:open` this never needs to ask about unsaved
     /// work first.
     fn workbench_open_diagram(&mut self, path: PathBuf) {
-        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
+        // Dedup by the file's own real path, not by a tab's name — a name is not a stable
+        // identity (a multi-tab file's first tab can be called anything at all, including
+        // the generic "diagram 1" every fresh session already starts with) and matching on
+        // it there caused a worse bug than the duplicate tabs it was meant to fix: opening a
+        // real file could silently land on that unrelated blank tab instead, looking exactly
+        // like the file had nothing in it.
+        if let Some(i) = self.tabs.iter().position(|t| t.source.as_deref() == Some(path.as_path())) {
+            self.switch_tab(i);
+            self.say(format!("{} — already open", path.display()), Tone::Note);
+            return;
+        }
         match persistence::load(&path) {
             Ok(ws) => {
-                // A single-tab file is named after the file itself here, not whatever name
-                // it happens to carry inside — `new_diagram` already writes that name, but an
-                // externally authored file might not. Either way, this is the name a second
-                // Enter on the same row looks for, so opening it twice switches to the one
-                // tab already open instead of piling up an empty duplicate — the bug a bare
-                // "already open" name check on the file's own internal name would still miss
-                // for anything written before this was true.
+                // A single-tab file is named after the file itself, not whatever name it
+                // happens to carry inside — `new_diagram` already writes that name, but an
+                // externally authored file might not.
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
                 let single = ws.tabs.len() == 1;
-                let first_name = if single { stem.clone() } else { ws.tabs[0].name.clone() };
-                if let Some(i) = self.tabs.iter().position(|t| t.name == first_name) {
-                    self.switch_tab(i);
-                    self.say(format!("{first_name} — already open"), Tone::Note);
-                    return;
-                }
                 let first_new = self.tabs.len();
+                // Lands on whichever tab was open when the file was saved, the same as
+                // `load_workspace` already does for a replacing `:open` — not always the
+                // first of the file's own tabs, which for a file saved mid-work on its
+                // second or third tab would otherwise land on an unrelated, possibly empty
+                // one and look like the file had nothing in it.
+                let land_on = first_new + ws.current.min(ws.tabs.len().saturating_sub(1));
                 for Tab { name, diagram } in ws.tabs {
                     let name = if single { stem.clone() } else { name };
-                    self.tabs.push(TabSlot { name, doc: diagram, ..Default::default() });
+                    self.tabs.push(TabSlot { name, doc: diagram, source: Some(path.clone()), ..Default::default() });
                 }
-                self.switch_tab(first_new);
+                self.switch_tab(land_on);
                 self.say(format!("opened {}", path.display()), Tone::Good);
             }
             Err(e) => self.say(e.to_string(), Tone::Bad),
@@ -2886,9 +3047,9 @@ impl App {
             self.say(format!("{name}: {e}"), Tone::Bad);
             return;
         }
+        self.rescan_workbench();
         if let Some(st) = &mut self.workbench {
-            st.rescan();
-            let n = st.rows().len();
+            let n = st.display_rows(self.registry.as_ref()).len();
             st.sel = st.sel.min(n.saturating_sub(1));
             if st.grabbed.as_ref().is_some_and(|g| g.path == entry.path) {
                 st.grabbed = None;
@@ -2902,19 +3063,50 @@ impl App {
     /// inline, since it needs to call back into `self.say` after the fs op, and `workbench_key`
     /// already holds a `&mut self.workbench` borrow when this is reached.
     fn workbench_commit_name(&mut self, what: workbench::Typing, text: String, dir: Option<PathBuf>, selected: Option<workbench::Row>) {
-        let result = match what {
-            workbench::Typing::NewDiagram => dir.ok_or_else(|| "no folder to add it to".to_string()).and_then(|d| crate::workbench::new_diagram(&d, &text).map_err(|e| e.to_string())).map(|_| format!("{text}.json added")),
-            workbench::Typing::NewFolder => dir.ok_or_else(|| "no folder to add it to".to_string()).and_then(|d| crate::workbench::new_folder(&d, &text).map_err(|e| e.to_string())).map(|_| format!("{text} added")),
-            workbench::Typing::Rename => selected.ok_or_else(|| "nothing selected".to_string()).and_then(|row| crate::workbench::rename(&row.entry(), &text).map_err(|e| e.to_string())).map(|_| format!("renamed to {text}")),
-        };
-        match result {
-            Ok(msg) => {
-                if let Some(st) = &mut self.workbench {
-                    st.rescan();
+        match what {
+            // A new diagram is opened right away, not left for a second Enter on its row —
+            // "create a diagram and have it immediately in focus, ready to add to" is the
+            // whole point of making one from here rather than by hand outside the app.
+            workbench::Typing::NewDiagram => {
+                let Some(d) = dir else {
+                    self.say("no folder to add it to", Tone::Bad);
+                    return;
+                };
+                match crate::workbench::new_diagram(&d, &text) {
+                    Ok(path) => {
+                        self.rescan_workbench();
+                        self.workbench = None;
+                        self.workbench_open_diagram(path);
+                    }
+                    Err(e) => self.say(e.to_string(), Tone::Bad),
                 }
-                self.say(msg, Tone::Good);
             }
-            Err(e) => self.say(e, Tone::Bad),
+            workbench::Typing::NewFolder => {
+                let Some(d) = dir else {
+                    self.say("no folder to add it to", Tone::Bad);
+                    return;
+                };
+                match crate::workbench::new_folder(&d, &text) {
+                    Ok(_) => {
+                        self.rescan_workbench();
+                        self.say(format!("{text} added"), Tone::Good);
+                    }
+                    Err(e) => self.say(e.to_string(), Tone::Bad),
+                }
+            }
+            workbench::Typing::Rename => {
+                let Some(row) = selected else {
+                    self.say("nothing selected", Tone::Bad);
+                    return;
+                };
+                match crate::workbench::rename(&row.entry(), &text) {
+                    Ok(_) => {
+                        self.rescan_workbench();
+                        self.say(format!("renamed to {text}"), Tone::Good);
+                    }
+                    Err(e) => self.say(e.to_string(), Tone::Bad),
+                }
+            }
         }
     }
 
@@ -2925,11 +3117,13 @@ impl App {
             self.say("nothing grabbed — m on a row first", Tone::Bad);
             return;
         };
-        let Some(row) = st.selected_row() else { return };
-        if !matches!(row.kind, workbench::RowKind::Folder { .. }) {
-            self.say("p lands on a folder", Tone::Bad);
-            return;
-        }
+        let row = match st.selected(self.registry.as_ref()) {
+            Some(workbench::DisplayRow::Fs(row)) if matches!(row.kind, workbench::RowKind::Folder { .. }) => row,
+            _ => {
+                self.say("p lands on a folder", Tone::Bad);
+                return;
+            }
+        };
         if row.path == grabbed.path || row.path.starts_with(&grabbed.path) {
             self.say("can't move a folder into itself", Tone::Bad);
             return;
@@ -2939,7 +3133,9 @@ impl App {
             Ok(_) => {
                 if let Some(st) = &mut self.workbench {
                     st.grabbed = None;
-                    st.rescan();
+                }
+                self.rescan_workbench();
+                if let Some(st) = &mut self.workbench {
                     st.expand(&dest);
                 }
                 self.say(format!("{} moved", grabbed.name), Tone::Good);
@@ -2956,7 +3152,7 @@ impl App {
         if st.root.is_none() {
             let n = st.recents.len();
             match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.workbench = None,
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('W') => self.workbench = None,
                 KeyCode::Char('j') | KeyCode::Down => st.move_by(1, n),
                 KeyCode::Char('k') | KeyCode::Up => st.move_by(-1, n),
                 KeyCode::Enter => {
@@ -2971,8 +3167,14 @@ impl App {
 
         // Computed before `st.editing` might be borrowed below — a method call on `st`
         // borrows the whole of it, which a live `&mut st.editing` binding would refuse.
-        let dir = st.current_dir();
-        let selected = st.selected_row();
+        let dir = st.current_dir(self.registry.as_ref());
+        // Only a real filesystem row can be renamed — a `Group`/`Element`/`Heading` row
+        // never arms `Typing::Rename` in the first place (see the `'r'` arm below), so this
+        // is `None` exactly when it would be unused.
+        let selected_fs = match st.selected(self.registry.as_ref()) {
+            Some(workbench::DisplayRow::Fs(row)) => Some(row),
+            _ => None,
+        };
 
         if let Some((what, buf)) = &mut st.editing {
             match k.code {
@@ -2989,70 +3191,82 @@ impl App {
                         self.say("needs a name", Tone::Bad);
                         return;
                     }
-                    self.workbench_commit_name(what, text, dir, selected);
+                    self.workbench_commit_name(what, text, dir, selected_fs);
                 }
                 _ => {}
             }
             return;
         }
 
+        let sel = st.selected(self.registry.as_ref());
+        // Real filesystem CRUD only makes sense on a real filesystem row, or on nothing at
+        // all (create lands in the root then) — never on the virtual elements section.
+        let on_fs_or_nothing = matches!(sel, None | Some(workbench::DisplayRow::Fs(_)));
+        let not_here = "elements are read from the diagrams themselves — edit it there";
         match k.code {
             KeyCode::Esc if st.grabbed.is_some() => st.grabbed = None,
-            KeyCode::Esc | KeyCode::Char('q') => self.workbench = None,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('W') => self.workbench = None,
             KeyCode::Char(':') => {
                 self.workbench = None;
                 self.cmdline = Some(cmdline::State::new(':'));
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                let n = st.rows().len();
+                let n = st.display_rows(self.registry.as_ref()).len();
                 st.move_by(1, n);
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                let n = st.rows().len();
+                let n = st.display_rows(self.registry.as_ref()).len();
                 st.move_by(-1, n);
             }
-            KeyCode::Enter => {
-                let Some(row) = st.selected_row() else { return };
-                match row.kind {
+            KeyCode::Enter => match sel {
+                Some(workbench::DisplayRow::Fs(row)) => match row.kind {
                     workbench::RowKind::Folder { .. } => st.toggle_expanded(&row.path),
+                    // Closes the panel the same way `tree_key`'s own resource-pick does:
+                    // opening a diagram is a "go look at it now" action.
                     workbench::RowKind::Diagram => {
-                        let path = row.path;
-                        self.workbench_open_diagram(path);
+                        self.workbench_open_diagram(row.path);
+                        self.workbench = None;
                     }
+                },
+                Some(workbench::DisplayRow::Group { id, .. }) => st.toggle_group(id),
+                Some(workbench::DisplayRow::Element { key, .. }) => {
+                    // Same idea: placing an element is a "go edit it now" action too. The
+                    // lookup needs `self.workbench`'s registry, so place first, close
+                    // second — the other order would have nothing left to look up.
+                    self.place_registry_resource(&key);
+                    self.workbench = None;
                 }
-            }
-            KeyCode::Right => {
-                if let Some(row) = st.selected_row()
-                    && matches!(row.kind, workbench::RowKind::Folder { expanded: false })
-                {
-                    st.expand(&row.path);
+                Some(workbench::DisplayRow::Heading) | None => {}
+            },
+            KeyCode::Right => match sel {
+                Some(workbench::DisplayRow::Fs(row)) if matches!(row.kind, workbench::RowKind::Folder { expanded: false }) => st.expand(&row.path),
+                Some(workbench::DisplayRow::Group { id, expanded: false, .. }) => st.expand_group(id),
+                _ => {}
+            },
+            KeyCode::Left => match sel {
+                Some(workbench::DisplayRow::Fs(row)) if matches!(row.kind, workbench::RowKind::Folder { expanded: true }) => st.toggle_expanded(&row.path),
+                Some(workbench::DisplayRow::Group { id, expanded: true, .. }) => st.toggle_group(id),
+                _ => {}
+            },
+            KeyCode::Char('n') if on_fs_or_nothing => st.editing = Some((workbench::Typing::NewDiagram, String::new())),
+            KeyCode::Char('N') if on_fs_or_nothing => st.editing = Some((workbench::Typing::NewFolder, String::new())),
+            KeyCode::Char('n' | 'N') => self.say(not_here, Tone::Bad),
+            KeyCode::Char('r') => match sel {
+                Some(workbench::DisplayRow::Fs(row)) => {
+                    let stem = row.name.strip_suffix(".json").map(str::to_string).unwrap_or(row.name);
+                    st.editing = Some((workbench::Typing::Rename, stem));
                 }
-            }
-            KeyCode::Left => {
-                if let Some(row) = st.selected_row()
-                    && matches!(row.kind, workbench::RowKind::Folder { expanded: true })
-                {
-                    st.toggle_expanded(&row.path);
-                }
-            }
-            KeyCode::Char('n') => st.editing = Some((workbench::Typing::NewDiagram, String::new())),
-            KeyCode::Char('N') => st.editing = Some((workbench::Typing::NewFolder, String::new())),
-            KeyCode::Char('r') => {
-                let name = st.selected_row().map(|r| r.name).unwrap_or_default();
-                let stem = name.strip_suffix(".json").map(str::to_string).unwrap_or(name);
-                st.editing = Some((workbench::Typing::Rename, stem));
-            }
-            KeyCode::Char('m') => {
-                if let Some(row) = st.selected_row() {
-                    st.grabbed = Some(row.entry());
-                }
-            }
+                _ => self.say(not_here, Tone::Bad),
+            },
+            KeyCode::Char('m') => match sel {
+                Some(workbench::DisplayRow::Fs(row)) => st.grabbed = Some(row.entry()),
+                _ => self.say(not_here, Tone::Bad),
+            },
             KeyCode::Char('p') => self.workbench_put(),
-            KeyCode::Char('d') => {
-                if let Some(row) = st.selected_row() {
-                    self.confirm = Some(Confirm::DeleteWorkbenchEntry(row.entry()));
-                }
-            }
+            KeyCode::Char('d') => match sel {
+                Some(workbench::DisplayRow::Fs(row)) => self.confirm = Some(Confirm::DeleteWorkbenchEntry(row.entry())),
+                _ => self.say(not_here, Tone::Bad),
+            },
             _ => {}
         }
     }
@@ -3872,10 +4086,10 @@ impl App {
                 self.say(format!("tab renamed to {arg:?}"), Tone::Good);
             }
             excmd::Op::TabClose => {
-                if self.tabs.len() > 1 && !self.doc.elements.is_empty() && self.dirty() && !bang {
-                    self.confirm = Some(Confirm::CloseTab);
-                } else {
+                if bang {
                     self.close_tab();
+                } else {
+                    self.tabclose_key();
                 }
             }
             excmd::Op::Tab => match arg.parse::<usize>() {
@@ -3936,17 +4150,10 @@ impl App {
                 }
             }
             excmd::Op::Workbench => {
-                if self.workbench.is_some() {
-                    self.workbench = None;
-                } else if !arg.is_empty() {
+                if !arg.is_empty() {
                     self.open_workbench(PathBuf::from(arg));
                 } else {
-                    let recents: Vec<PathBuf> = crate::config::load().workbenches.into_iter().map(PathBuf::from).collect();
-                    if recents.is_empty() {
-                        self.say("usage: :workbench <path> — no workbench opened before to pick from", Tone::Bad);
-                    } else {
-                        self.workbench = Some(workbench::State::recents(recents));
-                    }
+                    self.toggle_workbench();
                 }
             }
             excmd::Op::Sheet => {
@@ -4072,6 +4279,14 @@ impl App {
     }
 
     fn write(&mut self, arg: &str) -> bool {
+        // A bare `:w` on a tab opened from (or created in) the workbench already knows
+        // where it belongs — it saves straight back there, the same way a diagram opened
+        // any other way saves to `self.path`, and never asks for a path first.
+        if arg.is_empty()
+            && let Some(source) = self.tabs[self.tab].source.clone()
+        {
+            return self.write_workbench_source(&source);
+        }
         let path = if arg.is_empty() { self.path.clone() } else { Some(PathBuf::from(arg)) };
         let Some(path) = path else {
             self.say("no file name — :w <path>", Tone::Bad);
@@ -4086,6 +4301,40 @@ impl App {
             }
             Err(e) => {
                 self.say(format!("could not save {}: {e}", path.display()), Tone::Bad);
+                false
+            }
+        }
+    }
+
+    /// Every tab that shares `source` — the whole family a multi-tab workbench file was
+    /// opened as, not just the one tab standing on it now — re-saved back into that same
+    /// file, `current` set to whichever of them is active. Saving just the current tab's
+    /// `Document` alone would silently drop its siblings from the file on disk.
+    fn write_workbench_source(&mut self, source: &Path) -> bool {
+        let indices: Vec<usize> = self.tabs.iter().enumerate().filter(|(_, t)| t.source.as_deref() == Some(source)).map(|(i, _)| i).collect();
+        let current = indices.iter().position(|&i| i == self.tab).unwrap_or(0);
+        let tabs: Vec<Tab> = indices
+            .iter()
+            .map(|&i| Tab { name: self.tabs[i].name.clone(), diagram: if i == self.tab { self.doc.clone() } else { self.tabs[i].doc.clone() } })
+            .collect();
+        let ws = Workspace { version: crate::model::WORKSPACE_VERSION, grid: true, current, tabs };
+        match persistence::save(&ws, source) {
+            Ok(()) => {
+                // Saving one workbench file does not make every *other*, unrelated tab in
+                // the session clean too, but treating the whole session as settled here
+                // matches how a plain `:w` already behaves, and how additively opening a
+                // workbench tab in the first place never asked about unsaved work either.
+                self.saved = self.serialized();
+                // The registry is disk truth, not memory truth — an element just deleted
+                // from this file (or added, or changed) has to stop (or start) showing in
+                // the workbench's own elements section right away, not just the next time
+                // the panel happens to reopen.
+                self.rescan_workbench();
+                self.say(format!("saved {}", source.display()), Tone::Good);
+                true
+            }
+            Err(e) => {
+                self.say(format!("could not save {}: {e}", source.display()), Tone::Bad);
                 false
             }
         }
@@ -4199,7 +4448,7 @@ impl App {
         }
         if let Some(st) = &self.workbench {
             let area = Rect { x: full0.x, y: full.y, width: left_width, height: full.height };
-            f.render_widget(workbench::Browser { state: st }, area);
+            f.render_widget(workbench::Browser { state: st, registry: self.registry.as_ref() }, area);
         }
         let layers_h = self.layers.as_ref().map_or(0, |_| (self.doc.layers.len() as u16 + 6).min(full.height));
         let props_h = self.props.as_ref().map_or(0, |p| props::height(self.doc.element(p.target).map_or(0, |e| e.properties.len()), full.height.saturating_sub(layers_h)));
@@ -4249,6 +4498,10 @@ impl App {
         if let Some(d) = &self.expandpick {
             let area = chrome::centered(body, expandpick::WIDTH, expandpick::height(d.rows.len()));
             f.render_widget(expandpick::Dialog { state: d }, area);
+        }
+        if let Some(d) = &self.conflictpick {
+            let area = chrome::centered(body, conflictpick::WIDTH, conflictpick::HEIGHT);
+            f.render_widget(conflictpick::Dialog { state: d }, area);
         }
         if let Some(d) = &self.ctxmenu {
             let area = chrome::centered(body, ctxmenu::WIDTH, ctxmenu::height(d.rows.len()));
@@ -4326,6 +4579,7 @@ impl App {
             (self.export.is_some(), "export"),
             (self.importdlg.is_some(), "importdlg"),
             (self.expandpick.is_some(), "expandpick"),
+            (self.conflictpick.is_some(), "conflictpick"),
             (self.ctxmenu.is_some(), "ctxmenu"),
             (self.tabpick.is_some(), "tabpick"),
             (self.start.is_some(), "start"),
@@ -4568,7 +4822,7 @@ mod tests {
         key(&mut a, KeyCode::Enter); // confirms the one remembered workbench
         assert!(a.start.is_none(), "picking a workbench closes the dialog, like any other choice");
         assert!(a.workbench.is_some(), "and opens it");
-        assert_eq!(a.workbench.as_ref().unwrap().root, Some(root.clone()));
+        assert_eq!(a.workbench.as_ref().unwrap().root, Some(root.canonicalize().unwrap()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&config_dir).ok();
     }
@@ -5062,7 +5316,278 @@ mod tests {
     }
 
     #[test]
+    fn workbench_on_an_existing_file_says_so_clearly_instead_of_a_raw_os_error() {
+        let root = std::env::temp_dir().join(format!("vim-shapes-workbench-file-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("diagram.json");
+        std::fs::write(&file, "{}").unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", file.display()));
+        assert!(a.workbench.is_none(), "refused, not opened as if it were an empty folder of the same name");
+        assert!(matches!(&a.status, Some((m, Tone::Bad)) if m.contains("is a file")), "{:?}", a.status);
+        assert!(file.is_file(), "and the file itself is untouched");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn closing_and_reopening_the_workbench_panel_returns_to_the_same_one_without_asking() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-onesession-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let root = std::env::temp_dir().join(format!("vim-shapes-onesession-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        let opened = a.workbench.as_ref().unwrap().root.clone().unwrap();
+        assert!(a.workbench.is_some());
+
+        // Closed — bare :workbench toggles it off.
+        a.run_excmd("workbench".into());
+        assert!(a.workbench.is_none());
+
+        // A *different* session's-worth of state would show the recents picker (root:
+        // None) here; one session, one workbench means it goes straight back in instead.
+        a.run_excmd("workbench".into());
+        assert_eq!(a.workbench.as_ref().unwrap().root, Some(opened), "reopened the same one directly, no picker");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn shift_w_toggles_the_workbench_open_and_closed_the_same_as_bare_workbench() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-shiftw-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let root = std::env::temp_dir().join(format!("vim-shapes-shiftw-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut a = app();
+        // W with no workbench opened yet this session, and none remembered: same "usage"
+        // refusal as bare :workbench.
+        key(&mut a, KeyCode::Char('W'));
+        assert!(a.workbench.is_none());
+        assert!(matches!(&a.status, Some((m, Tone::Bad)) if m.contains("usage")));
+
+        a.run_excmd(format!("workbench {}", root.display()));
+        let opened = a.workbench.as_ref().unwrap().root.clone().unwrap();
+        assert!(a.workbench.is_some());
+
+        key(&mut a, KeyCode::Char('W')); // closes it
+        assert!(a.workbench.is_none());
+
+        key(&mut a, KeyCode::Char('W')); // one session, one workbench: reopens the same one
+        assert_eq!(a.workbench.as_ref().unwrap().root, Some(opened));
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn opening_a_diagram_from_the_workbench_opens_a_tab_closes_the_panel_and_shows_its_real_shapes() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-openclose-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let root = std::env::temp_dir().join(format!("vim-shapes-openclose-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        // A real saved diagram: two object types and the relation between them — the shapes
+        // this test has to actually see after opening it, not just an element count.
+        let mut doc = crate::model::Document::default();
+        let asset = doc.add(ShapeKind::ObjectType, "Asset", 0.0, 0.0);
+        let location = doc.add(ShapeKind::ObjectType, "Asset Location", 20.0, 0.0);
+        doc.connect(RelationKind::LinkType, location, asset).unwrap();
+        persistence::save(&Workspace::single("Asset".into(), doc), &root.join("assets.json")).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        assert!(a.workbench.is_some(), "open to start with");
+        let row_i = a
+            .workbench
+            .as_ref()
+            .unwrap()
+            .display_rows(a.registry.as_ref())
+            .iter()
+            .position(|r| matches!(r, workbench::DisplayRow::Fs(row) if row.name == "assets.json"))
+            .unwrap();
+        a.workbench.as_mut().unwrap().sel = row_i;
+
+        key(&mut a, KeyCode::Enter);
+
+        // The diagram opened in a tab, named after the file (a single-tab file's own
+        // internal tab name is not what matters — the file's own name is).
+        assert_eq!(a.tabs.len(), 2, "the session's own starting tab, plus the one just opened");
+        assert_eq!(a.tab_name(), "assets");
+        // The workbench closed.
+        assert!(a.workbench.is_none(), "the panel closes once you've picked something to look at");
+        // And the shapes from the file are really there, not a blank diagram.
+        assert_eq!(a.doc.elements.len(), 2);
+        assert!(a.doc.elements.iter().any(|e| e.display() == "Asset" && e.kind == ShapeKind::ObjectType));
+        assert!(a.doc.elements.iter().any(|e| e.display() == "Asset Location" && e.kind == ShapeKind::ObjectType));
+        assert_eq!(a.doc.relations.len(), 1);
+        assert_eq!(a.doc.relations[0].kind, RelationKind::LinkType);
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn deleting_an_element_s_last_diagram_drops_it_from_the_registry_as_soon_as_it_is_saved() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-stale-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let root = std::env::temp_dir().join(format!("vim-shapes-stale-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut doc = crate::model::Document::default();
+        doc.add(ShapeKind::ObjectType, "Asset", 0.0, 0.0);
+        persistence::save(&Workspace::single("Asset".into(), doc), &root.join("assets.json")).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        assert!(a.registry.as_ref().unwrap().entries.values().any(|e| e.name == "Asset"), "compiled fresh on open");
+
+        // Open the diagram — this closes the panel, per how opening from the workbench
+        // works now — and delete its only element, then save.
+        let row_i = a
+            .workbench
+            .as_ref()
+            .unwrap()
+            .display_rows(a.registry.as_ref())
+            .iter()
+            .position(|r| matches!(r, workbench::DisplayRow::Fs(row) if row.name == "assets.json"))
+            .unwrap();
+        a.workbench.as_mut().unwrap().sel = row_i;
+        key(&mut a, KeyCode::Enter);
+        assert!(a.workbench.is_none(), "the panel is closed for this whole scenario");
+        let placed = a.doc.elements.iter().find(|e| e.display() == "Asset").unwrap().id;
+        a.delete_element(placed);
+        assert!(a.write(""), "saves back to assets.json with no path asked");
+
+        // Gone from the registry immediately — no need to close and reopen the panel for
+        // this to catch up, since the panel was never reopened here at all.
+        assert!(!a.registry.as_ref().unwrap().entries.values().any(|e| e.name == "Asset"), "dropped from the last diagram that had it, dropped from the registry");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn bare_w_on_a_workbench_tab_saves_back_to_its_own_file_without_asking_and_keeps_its_siblings() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-savepath-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let root = std::env::temp_dir().join(format!("vim-shapes-savepath-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        // A multi-tab file: "diagram 1" (empty) and "Asset" (one element already).
+        let empty = crate::model::Document::default();
+        let mut asset = crate::model::Document::default();
+        asset.add(ShapeKind::ObjectType, "Asset", 0.0, 0.0);
+        let path = root.join("oneos.json");
+        let ws = Workspace { version: crate::model::WORKSPACE_VERSION, grid: true, current: 1, tabs: vec![Tab { name: "diagram 1".into(), diagram: empty }, Tab { name: "Asset".into(), diagram: asset }] };
+        persistence::save(&ws, &path).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        let row_i = a
+            .workbench
+            .as_ref()
+            .unwrap()
+            .display_rows(a.registry.as_ref())
+            .iter()
+            .position(|r| matches!(r, workbench::DisplayRow::Fs(row) if row.name == "oneos.json"))
+            .unwrap();
+        a.workbench.as_mut().unwrap().sel = row_i;
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.tab_name(), "Asset");
+
+        // Draw something new on the tab that's actually in focus, then a bare :w.
+        a.doc.add(ShapeKind::ObjectType, "AssetLocation", 20.0, 0.0);
+        assert!(a.write(""), "saved without a path — the tab already knew where it came from");
+        assert!(matches!(&a.status, Some((m, Tone::Good)) if m.contains("saved")));
+
+        let reloaded = persistence::load(&path).unwrap();
+        assert_eq!(reloaded.tabs.len(), 2, "the empty sibling tab is still there, not dropped");
+        assert_eq!(reloaded.tabs[0].name, "diagram 1");
+        assert_eq!(reloaded.tabs[1].diagram.elements.len(), 2, "Asset, plus the one just drawn");
+        assert_eq!(reloaded.current, 1, "current points at the tab that was actually in focus");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn opening_a_multi_tab_workbench_file_whose_first_tab_is_named_diagram_1_still_loads_its_real_content() {
+        // The exact shape of the bug this guards: a file whose first tab happens to share
+        // the generic name every fresh session's own blank tab already has — dedup-by-name
+        // would find that unrelated blank tab and switch to it, never loading the file.
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-multitab-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let root = std::env::temp_dir().join(format!("vim-shapes-multitab-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut empty = crate::model::Document::default();
+        empty.metadata.view = View::Free;
+        let mut asset = crate::model::Document::default();
+        asset.add(ShapeKind::ObjectType, "Asset", 0.0, 0.0);
+        let ws = Workspace {
+            version: crate::model::WORKSPACE_VERSION,
+            grid: true,
+            current: 1,
+            tabs: vec![Tab { name: "diagram 1".into(), diagram: empty }, Tab { name: "Asset".into(), diagram: asset }],
+        };
+        persistence::save(&ws, &root.join("oneos_arch_workbench.json")).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        assert_eq!(a.tabs.len(), 1, "just the session's own starting tab so far");
+
+        let row_i = a
+            .workbench
+            .as_ref()
+            .unwrap()
+            .display_rows(a.registry.as_ref())
+            .iter()
+            .position(|r| matches!(r, workbench::DisplayRow::Fs(row) if row.name == "oneos_arch_workbench.json"))
+            .unwrap();
+        a.workbench.as_mut().unwrap().sel = row_i;
+        key(&mut a, KeyCode::Enter);
+
+        assert_eq!(a.tabs.len(), 3, "the session's own blank tab, plus both of the file's own");
+        assert_eq!(a.tab_name(), "Asset", "landed on the second of the two tabs just added");
+        assert_eq!(a.doc.elements.len(), 1, "the file's real content — not 0, the bug's own symptom");
+        assert_eq!(a.doc.elements[0].display(), "Asset");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
     fn the_workbench_always_docks_left_and_opening_the_same_diagram_twice_switches_instead_of_duplicating() {
+        // Opening a workbench writes back through `config::touch_workbench` — isolate it
+        // from the real config file the same way the theme test isolates `XDG_CONFIG_HOME`.
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-workbench-key-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
         let root = std::env::temp_dir().join(format!("vim-shapes-workbench-key-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -5070,35 +5595,182 @@ mod tests {
         a.run_excmd(format!("workbench {}", root.display()));
         assert!(a.workbench.is_some());
 
-        // A new diagram, named after what was typed — the same name a second Enter on the
-        // row has to find again.
+        // A new diagram, named after what was typed — opened right away, in focus, panel
+        // closed, ready to add to — not left to a second Enter on its own row.
         key(&mut a, KeyCode::Char('n'));
         press(&mut a, "Checkout Flow");
         key(&mut a, KeyCode::Enter);
         assert!(root.join("Checkout Flow.json").exists());
-
-        let row_i = a.workbench.as_ref().unwrap().rows().iter().position(|r| r.name == "Checkout Flow.json").unwrap();
-        a.workbench.as_mut().unwrap().sel = row_i;
-        key(&mut a, KeyCode::Enter);
-        assert_eq!(a.tabs.len(), 2, "the fresh diagram opened as a new tab");
+        assert_eq!(a.tabs.len(), 2, "the fresh diagram opened as a new tab immediately");
         assert_eq!(a.tab_name(), "Checkout Flow");
-        assert!(a.workbench.is_some(), "the panel stays open — browsing continues");
+        assert!(a.workbench.is_none(), "the panel closes — go edit it now");
+        assert_eq!(a.tabs[a.tab].source.as_deref(), Some(root.canonicalize().unwrap().join("Checkout Flow.json").as_path()), "and it knows where :w saves it back to");
 
-        // Back to the workbench, and Enter on the same row again.
-        let row_i = a.workbench.as_ref().unwrap().rows().iter().position(|r| r.name == "Checkout Flow.json").unwrap();
+        // Reopening the workbench (one session, one workbench: no path to retype) and
+        // Enter on the same row again switches to the tab already open, not a third one.
+        a.run_excmd("workbench".into());
+        let row_i = a
+            .workbench
+            .as_ref()
+            .unwrap()
+            .display_rows(a.registry.as_ref())
+            .iter()
+            .position(|r| matches!(r, workbench::DisplayRow::Fs(row) if row.name == "Checkout Flow.json"))
+            .unwrap();
         a.workbench.as_mut().unwrap().sel = row_i;
         key(&mut a, KeyCode::Enter);
         assert_eq!(a.tabs.len(), 2, "still two — the second Enter switched to the tab already open, not a third");
         assert_eq!(a.tab_name(), "Checkout Flow");
+        assert!(a.workbench.is_none(), "opening a diagram closes the panel, the same as placing a registry element or making a new one");
 
         // The panel always reserves its own column — never a floating dialog — regardless
         // of terminal width, unlike the sheet's own right-hand dock.
+        a.run_excmd("workbench".into());
         use ratatui::{backend::TestBackend, Terminal};
         let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
         term.draw(|f| a.draw(f)).unwrap();
         assert_eq!(a.body.x, workbench::WIDTH, "the diagram body starts after the workbench's own column");
 
         std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn the_registry_lets_you_place_an_element_from_another_diagram_and_expand_its_real_relation() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-registry-key-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let root = std::env::temp_dir().join(format!("vim-shapes-registry-key-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        // One diagram has Order linked to Customer; a second, unrelated diagram draws
+        // Customer again on its own — the shared object type the registry has to merge, and
+        // the real relation only the first diagram knows about.
+        let mut orders = crate::model::Document::default();
+        let order = orders.add(ShapeKind::ObjectType, "Order", 0.0, 0.0);
+        orders.element_mut(order).unwrap().api_name = Some("order".into());
+        let customer = orders.add(ShapeKind::ObjectType, "Customer", 20.0, 0.0);
+        orders.element_mut(customer).unwrap().api_name = Some("customer".into());
+        orders.connect(RelationKind::LinkType, order, customer).unwrap();
+        persistence::save(&Workspace::single("orders".into(), orders), &root.join("orders.json")).unwrap();
+
+        let mut customers = crate::model::Document::default();
+        let c2 = customers.add(ShapeKind::ObjectType, "Customer", 0.0, 0.0);
+        customers.element_mut(c2).unwrap().api_name = Some("customer".into());
+        persistence::save(&Workspace::single("customers".into(), customers), &root.join("customers.json")).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        let st = a.workbench.as_mut().unwrap();
+        st.expand_group(workbench::GroupId::Root);
+        st.expand_group(workbench::GroupId::Layer(ShapeKind::ObjectType.layer()));
+        st.expand_group(workbench::GroupId::Kind(ShapeKind::ObjectType));
+        let rows = st.display_rows(a.registry.as_ref());
+        let order_row = rows.iter().position(|r| matches!(r, workbench::DisplayRow::Element { name, .. } if name == "Order")).unwrap();
+        st.sel = order_row;
+
+        // Placed onto the current (third, unrelated) diagram — not a fresh tab.
+        let tabs_before = a.tabs.len();
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.tabs.len(), tabs_before, "landed on the diagram already open, not a new tab");
+        assert_eq!(a.doc.elements.len(), 1);
+        assert_eq!(a.doc.elements[0].display(), "Order");
+        assert!(a.workbench.is_none(), "placing an element closes the panel, like picking a tree resource does — so the diagram's own keys (e) work right after");
+
+        key(&mut a, KeyCode::Char('e'));
+        assert!(a.expandpick.is_some(), "Order's real link to Customer, from the other diagram, is offered");
+        key(&mut a, KeyCode::Enter);
+        assert!(a.expandpick.is_none());
+        assert_eq!(a.doc.elements.len(), 2, "Customer is now on this diagram too");
+        assert!(a.doc.elements.iter().any(|e| e.display() == "Customer"));
+        assert!(a.doc.relations.iter().any(|r| r.kind == RelationKind::LinkType));
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn a_workbench_path_with_redundant_components_is_remembered_canonically() {
+        // `:workbench .` used to be remembered as the literal string "." — meaningless once
+        // the app's working directory differs between runs. Isolated from the real config
+        // file the same way the other config-writing tests are.
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-workbench-canon-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let root = std::env::temp_dir().join(format!("vim-shapes-workbench-canon-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let messy = root.join("sub").join("..");
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", messy.display()));
+        let opened = a.workbench.as_ref().unwrap().root.clone().unwrap();
+        let canonical = root.canonicalize().unwrap();
+        assert_eq!(opened, canonical, "resolved to an absolute path, not kept exactly as typed");
+        assert_eq!(crate::config::load().workbenches.first(), Some(&canonical.display().to_string()), "and remembered the same way");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn importing_an_ontology_that_disagrees_with_the_registry_opens_the_resolver() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-conflict-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let root = std::env::temp_dir().join(format!("vim-shapes-conflict-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        // A diagram already in the workbench: Customer, with one property.
+        let mut doc = crate::model::Document::default();
+        let cust = doc.add(ShapeKind::ObjectType, "Customer", 0.0, 0.0);
+        doc.element_mut(cust).unwrap().api_name = Some("customer".into());
+        persistence::save(&Workspace::single("customers".into(), doc), &root.join("customers.json")).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        assert_eq!(a.registry.as_ref().unwrap().entries.len(), 1);
+
+        // A fresh export redefining Customer with two properties instead.
+        let ontology_path = root.join("ontology.json");
+        std::fs::write(
+            &ontology_path,
+            r#"{
+                "version": 2,
+                "objectTypes": [
+                    {
+                        "id": "ot.customer", "apiName": "customer",
+                        "displayMetadata": {"displayName": "Customer"},
+                        "status": {"type": "active"}, "typeGroups": [], "interfaces": [],
+                        "primaryKeys": ["p.id"], "titlePropertyId": null,
+                        "properties": [
+                            {"id": "p.id", "apiName": "id", "displayMetadata": {"displayName": "Id", "visibility": "NORMAL"}, "status": {"type": "active"}, "baseType": {"type": "STRING"}},
+                            {"id": "p.name", "apiName": "name", "displayMetadata": {"displayName": "Name", "visibility": "NORMAL"}, "status": {"type": "active"}, "baseType": {"type": "STRING"}}
+                        ],
+                        "datasources": []
+                    }
+                ],
+                "interfaces": [], "relations": [], "actionTypes": [], "sharedProperties": []
+            }"#,
+        )
+        .unwrap();
+        a.run_excmd(format!("import {}", ontology_path.display()));
+        assert!(a.conflictpick.is_some(), "customer's properties disagree with what the registry already had");
+        assert_eq!(a.conflictpick.as_ref().unwrap().conflicts.len(), 1);
+        assert_eq!(a.conflictpick.as_ref().unwrap().current().unwrap().name, "Customer");
+
+        key(&mut a, KeyCode::Char('i'));
+        assert!(a.conflictpick.is_none(), "the only conflict is resolved, so the dialog closes itself");
+        let customer_key = crate::registry::Key { kind: ShapeKind::ObjectType, ident: crate::registry::Ident::Api("customer".into()) };
+        assert_eq!(a.registry.as_ref().unwrap().entries.get(&customer_key).unwrap().properties.len(), 2, "i took the incoming definition");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
     }
 
     #[test]
@@ -6040,33 +6712,33 @@ mod tests {
     }
 
     #[test]
-    fn hovering_reaches_into_the_gutter_and_clicking_the_arrow_opens_off_that_port() {
+    fn hovering_reaches_into_the_gutter_from_any_direction_and_clicking_an_arrow_opens_off_that_port() {
         let mut a = app();
         // Small and close to the origin — `App::new`'s default body is 80×22 cells, and a
         // point off the edge of it is `screen_to_world`'s "outside the diagram" already,
         // before the arrow geometry is even asked about.
         let x = a.doc.add(ApplicationComponent, "CRM", 10.0, 8.0);
-        // A box whose right handle's own row is a whole number: `handle_at`'s distance
-        // weights a row twice a column (cells read taller than wide), so a handle exactly
-        // between two rows would need the click to land within half of half a row of it —
-        // tighter than a mouse's own cell resolution ever lands.
-        a.doc.element_mut(x).unwrap().h = 6.0;
         a.set_cursor(x);
-        let right_arrow = a.doc.element(x).unwrap().arrows(ARROW_GAP)[3];
-        let at = (right_arrow.0.round(), right_arrow.1.round());
-        // A point just inside the box first sets hover the ordinary way...
         let e = a.doc.element(x).unwrap().clone();
-        mouse(&mut a, MouseEventKind::Moved, (e.x + 1.0, e.y + 1.0));
-        assert_eq!(a.hover, Some(x));
-        // ...and a point out in the gutter, past the border, keeps it: an arrow drawn
-        // outside its shape would otherwise go cold the instant the mouse crosses the edge
-        // on the way to it.
-        mouse(&mut a, MouseEventKind::Moved, at);
-        assert_eq!(a.hover, Some(x), "hover reaches into the arrow's own gutter");
-        assert!(!e.contains((at.0, at.1)), "the arrow point really is outside the box");
+        // Straight up, off the top edge: a circle around the arrow's own drawn point would
+        // leave a dead band here, since a vertical approach never gets as close to it as a
+        // horizontal one does — this is the path that used to lose hover before the arrow
+        // was ever reached.
+        for y in ((e.y - ARROW_MARGIN).ceil() as i32..=(e.y as i32)).rev() {
+            mouse(&mut a, MouseEventKind::Moved, (e.x + e.w / 2.0, y as f64));
+            assert_eq!(a.hover, Some(x), "still hovering at row {y}, straight up from the top edge");
+        }
+        // Diagonally, off the top-right corner: the worst case for a circular hit-zone.
+        for k in 1..=3 {
+            let p = (e.right() + k as f64, e.y - k as f64);
+            mouse(&mut a, MouseEventKind::Moved, p);
+            assert_eq!(a.hover, Some(x), "still hovering {k} out on the NE diagonal");
+        }
+        let at = (e.right() + 1.0, e.y - 1.0);
+        assert!(!e.contains(at), "the click really is outside the box");
         click(&mut a, MouseButton::Left, at);
         assert!(matches!(a.palette.as_ref().map(|p| p.purpose), Some(palette::Purpose::Relate(_))), "the same dialog o opens");
-        assert_eq!(a.pending_port, Some(3), "the right handle — the arrow clicked");
+        assert_eq!(a.pending_port, Some(2), "the top-right corner — the arrow clicked");
     }
 
     #[test]
@@ -6356,6 +7028,29 @@ mod tests {
         key(&mut a, KeyCode::Esc);
         a.run_excmd("tabclose".into());
         assert!(matches!(a.confirm, Some(Confirm::CloseTab)));
+        press(&mut a, "y");
+        assert_eq!(a.tabs.len(), 1);
+    }
+
+    #[test]
+    fn ctrl_w_closes_a_tab_the_same_way_tabclose_does_and_is_refused_on_the_only_one() {
+        let mut a = app();
+        key(&mut a, KeyCode::Char('w')); // plain w, not ctrl — does nothing here
+        assert_eq!(a.tabs.len(), 1);
+        a.on_key(Stroke::ctrl('w').event());
+        assert_eq!(a.tabs.len(), 1, "the only tab — refused, not closed out from under you");
+        assert!(matches!(&a.status, Some((_, Tone::Bad))));
+
+        a.run_excmd("tabnew architecture".into());
+        assert_eq!(a.tabs.len(), 2);
+        a.on_key(Stroke::ctrl('w').event());
+        assert_eq!(a.tabs.len(), 1, "clean, so no confirm — just closes");
+
+        a.run_excmd("tabnew architecture".into());
+        a.run_excmd("add node".into());
+        key(&mut a, KeyCode::Esc);
+        a.on_key(Stroke::ctrl('w').event());
+        assert!(matches!(a.confirm, Some(Confirm::CloseTab)), "unsaved work — asks first, same as :tabclose");
         press(&mut a, "y");
         assert_eq!(a.tabs.len(), 1);
     }

@@ -961,6 +961,16 @@ pub static COMMANDS: &[Cmd] = &[
         avail: |w| need(w.normal() && w.tabs > 1, "only one tab — ^t makes another"),
         run: &[Stroke::k('g'), Stroke::k('t')],
     },
+    Cmd {
+        keys: "^w",
+        short: "",
+        what: |w| if w.tabs == 1 { "close this tab — the only one, so refused: :new starts over" } else { "close this tab — asks first if its diagram is unsaved" },
+        section: Section::Tab,
+        on: &[Stroke::ctrl('w')],
+        prefix: None,
+        avail: |w| need(w.normal() && w.tabs > 1, "the only tab — :new starts over, :tabnew adds another"),
+        run: &[Stroke::ctrl('w')],
+    },
     // ── files ───────────────────────────────────────────────────────────────
     Cmd {
         keys: "ZZ",
@@ -981,6 +991,16 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::Z),
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[Stroke::k('Z'), Stroke::k('Q')],
+    },
+    Cmd {
+        keys: "W",
+        short: "",
+        what: |_| "the architecture workbench, docked on the left — toggles it, or opens this session's own one",
+        section: Section::File,
+        on: &[Stroke::k('W')],
+        prefix: None,
+        avail: |w| need(w.normal(), ONLY_NORMAL),
+        run: &[Stroke::k('W')],
     },
     // ── modes ───────────────────────────────────────────────────────────────
     Cmd {

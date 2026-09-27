@@ -1199,16 +1199,32 @@ impl Element {
         })
     }
 
-    /// The arrow within `tol` cells of a point, if any — `handle_at`'s counterpart for
-    /// `arrows`.
-    pub fn arrow_at(&self, p: (f64, f64), tol: f64, gap: f64) -> Option<usize> {
-        self.arrows(gap)
-            .iter()
-            .enumerate()
-            .map(|(i, h)| (i, (h.0 - p.0).powi(2) + ((h.1 - p.1) * 2.0).powi(2)))
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .filter(|&(_, d)| d <= tol.powi(2))
-            .map(|(i, _)| i)
+    /// Which of the eight regions around the box a point outside it falls in, if it is
+    /// within `margin` of it — the box's own edges and corners extended straight out, not a
+    /// circle around each arrow's own drawn position. A circle leaves dead ground between
+    /// one arrow's reach and the next; a handle approached from an angle a circle's radius
+    /// doesn't cover would lose hover before the mouse ever got there. Edges extended
+    /// outward have no such gap: every point in the margin is in exactly one region, however
+    /// it was reached, so an arrow can never go cold on the way to it.
+    pub fn arrow_region(&self, (px, py): (f64, f64), margin: f64) -> Option<usize> {
+        let (x, y, r, b) = (self.x, self.y, self.right(), self.bottom());
+        if px < x - margin || px > r + margin || py < y - margin || py > b + margin {
+            return None;
+        }
+        let col = if px < x { 0 } else if px > r { 2 } else { 1 };
+        let row = if py < y { 0 } else if py > b { 2 } else { 1 };
+        match (row, col) {
+            (0, 0) => Some(0), // NW
+            (0, 1) => Some(1), // N
+            (0, 2) => Some(2), // NE
+            (1, 2) => Some(3), // E
+            (2, 2) => Some(4), // SE
+            (2, 1) => Some(5), // S
+            (2, 0) => Some(6), // SW
+            (1, 0) => Some(7), // W
+            (1, 1) => None,    // inside the box itself — not an arrow region at all
+            _ => unreachable!(),
+        }
     }
 
     /// The name a status line or picker calls it by: its label, or its kind when unlabelled.
@@ -1607,15 +1623,15 @@ impl Document {
         self.elements_in_order().into_iter().rev().find(|e| self.element_visible(e.id) && e.contains(p)).map(|e| e.id)
     }
 
-    /// The frontmost visible element a point is inside, or — failing that — whose hover
-    /// arrow it is on: what `hover` tracks, so an arrow drawn outside its shape's box stays
-    /// clickable right up until the mouse actually leaves its gutter, not the instant it
-    /// crosses the border on the way there.
-    pub fn element_near(&self, p: (f64, f64), arrow_tol: f64, arrow_gap: f64) -> Option<ElementId> {
+    /// The frontmost visible element a point is inside, or — failing that — within its
+    /// hover-arrow margin: what `hover` tracks, so the whole gutter around a shape's box
+    /// stays live right up until the mouse actually leaves it, not the instant it crosses
+    /// the border on the way to whichever arrow it's headed for.
+    pub fn element_near(&self, p: (f64, f64), arrow_margin: f64) -> Option<ElementId> {
         self.elements_in_order()
             .into_iter()
             .rev()
-            .find(|e| self.element_visible(e.id) && (e.contains(p) || e.arrow_at(p, arrow_tol, arrow_gap).is_some()))
+            .find(|e| self.element_visible(e.id) && (e.contains(p) || e.arrow_region(p, arrow_margin).is_some()))
             .map(|e| e.id)
     }
 
@@ -1938,6 +1954,41 @@ mod tests {
         assert_eq!(e.handle_at(top_left, 0.5), Some(0));
         assert_eq!(e.handle_at((top_left.0 + 0.1, top_left.1), 0.5), Some(0), "close enough");
         assert_eq!(e.handle_at(e.center(), 0.5), None, "the middle is nobody's handle");
+    }
+
+    #[test]
+    fn arrow_region_covers_the_whole_gutter_with_no_gap_between_directions() {
+        let mut doc = Document::default();
+        let a = doc.add(Box, "", 10.0, 10.0);
+        let e = doc.element(a).unwrap().clone();
+        assert_eq!(e.arrow_region(e.center(), 3.0), None, "inside the box is nobody's arrow");
+        assert_eq!(e.arrow_region((e.x, e.y), 3.0), None, "the border itself is still the box, not the gutter");
+        // Every point on a straight walk outward, in each of the eight directions, lands in
+        // that direction's own region the whole way out to the margin — the bug this guards
+        // against: a circle around each arrow's own drawn point left gaps a vertical or
+        // diagonal approach could fall through, going cold before the mouse ever arrived.
+        let mid = ((e.x + e.right()) / 2.0, (e.y + e.bottom()) / 2.0);
+        let rays: [((f64, f64), usize); 8] = [
+            ((e.x, e.y), 0),       // NW
+            ((mid.0, e.y), 1),     // N
+            ((e.right(), e.y), 2), // NE
+            ((e.right(), mid.1), 3), // E
+            ((e.right(), e.bottom()), 4), // SE
+            ((mid.0, e.bottom()), 5), // S
+            ((e.x, e.bottom()), 6), // SW
+            ((e.x, mid.1), 7),     // W
+        ];
+        for ((bx, by), dir) in rays {
+            let (dx, dy) = (bx - mid.0, by - mid.1);
+            let len = dx.hypot(dy);
+            let (ux, uy) = (dx / len, dy / len);
+            // Six steps out, well inside a 3-cell margin on either axis: every one of them
+            // must still land in `dir`'s own region, not fall through to `None`.
+            for k in 1..=6 {
+                let p = (mid.0 + ux * (len + k as f64 * 0.5), mid.1 + uy * (len + k as f64 * 0.5));
+                assert_eq!(e.arrow_region(p, 3.0), Some(dir), "direction {dir}, {k} steps out: {p:?}");
+            }
+        }
     }
 
     #[test]
