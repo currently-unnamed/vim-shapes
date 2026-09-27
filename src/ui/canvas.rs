@@ -63,6 +63,12 @@ pub struct Scene<'a> {
 /// still reads as the box it is, and the wobble shows in the braille.
 const SKETCH: f64 = 0.35;
 
+/// How wide a relation's own label wraps to when nothing has set `text.width` — an element's
+/// blank width is its own inside, but a relation has no box to fall back on, so this is the
+/// line the app draws instead: narrow enough that a long sentence stands as a short, tall
+/// paragraph near the line it is on rather than a wide one bleeding into whatever is beside it.
+const DEFAULT_LABEL_WRAP: usize = 32;
+
 impl Widget for Scene<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
@@ -246,6 +252,19 @@ impl Scene<'_> {
                     (false, _, false) => Mark::Plain(theme::t().sand),
                 };
                 paint_mark(ctx, h, mark, flip);
+            }
+            // A plain hover, not a reshape in hand: an arrow just outside each handle too,
+            // faint — click one to add a new connected shape that way, the mouse's own `o`.
+            // Not shown mid-reshape: a handle already in hand has nothing to do with opening
+            // a new one.
+            if on.is_none() {
+                let (cx, cy) = e.center();
+                let colour = theme::fade(theme::t().aqua, 45, self.ground());
+                for a in e.arrows(super::ARROW_GAP) {
+                    let (dx, dy) = (a.0 - cx, a.1 - cy);
+                    let len = dx.hypot(dy).max(0.001);
+                    paint_mark(ctx, a, Mark::Arrow(colour, (dx / len, dy / len)), flip);
+                }
             }
         }
         for e in self.doc.elements_in_order() {
@@ -442,8 +461,20 @@ impl Scene<'_> {
                     Style::new().fg(theme::t().structure)
                 };
                 let style = dress(style, &r.text, plain, self.ground());
-                let bw = badge.chars().count() as f64;
-                put(buf, px - bw / 2.0, py - 1.5, &badge, style);
+                // A relation has no box to wrap inside the way an element's label does, so a
+                // long one — an ontology link's own description, most often — gets a default
+                // width of its own rather than running the full length of the line it is on
+                // and bleeding into whatever else is nearby, or across a diagonal.
+                let wrap_w = r.text.width.map_or(DEFAULT_LABEL_WRAP, |w| w.max(1) as usize);
+                let lines: Vec<String> = if r.text.wrap { super::chrome::wrap(&badge, wrap_w) } else { vec![badge] };
+                // Stacked upward, so the line nearest the connector never moves and a longer
+                // label just grows away from it.
+                let n = lines.len();
+                for (i, line) in lines.iter().enumerate() {
+                    let bw = line.chars().count() as f64;
+                    let y = py - 1.5 - (n - 1 - i) as f64;
+                    put(buf, px - bw / 2.0, y, line, style);
+                }
             }
         }
     }
@@ -547,6 +578,9 @@ enum Mark {
     Patched(Color),
     /// A filled diamond in a ring — the one the cursor is on.
     Focused(Color),
+    /// A small hollow triangle pointing away from its shape, along the given unit vector —
+    /// a hover arrow inviting a new connected shape that way.
+    Arrow(Color, Point),
 }
 
 /// Paint a mark at `(cx, cy)`, in braille. Sizes are in cells, the aspect corrected so a
@@ -567,6 +601,17 @@ fn paint_mark(ctx: &mut Context, (cx, cy): Point, mark: Mark, flip: impl Fn(f64)
                 paint_primitive(ctx, CurvePrimitive::Lines(diamond(rx * k, ry * k)), c, flip);
             }
             paint_primitive(ctx, ring(rx + 0.9, ry + 0.45), c, flip);
+        }
+        Mark::Arrow(c, (ux, uy)) => {
+            // Aspect-corrected the same way a diamond is: the y-reach of the tip and base
+            // halved, so the triangle points true rather than leaning with the cell shape.
+            let (len, wid) = (0.8, 0.55);
+            let tip = (cx + ux * len, cy + uy * len * 0.5);
+            let base = (cx - ux * len * 0.4, cy - uy * len * 0.2);
+            let (px, py) = (-uy, ux);
+            let a = (base.0 + px * wid, base.1 + py * wid * 0.5);
+            let b = (base.0 - px * wid, base.1 - py * wid * 0.5);
+            paint_primitive(ctx, CurvePrimitive::Lines(vec![(tip, a), (a, b), (b, tip)]), c, flip);
         }
     }
 }
@@ -747,6 +792,42 @@ mod tests {
         assert!(out.contains("component"), "{out}");
         assert!(out.contains("invoice"), "{out}");
         assert!(out.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)), "something was drawn in braille");
+    }
+
+    #[test]
+    fn a_relation_label_longer_than_the_default_wraps_to_several_lines_and_a_short_one_does_not() {
+        let mut doc = Document::default();
+        let a = doc.add(ShapeKind::ObjectType, "Location", 2.0, 2.0);
+        let b = doc.add(ShapeKind::ObjectType, "Asset", 40.0, 20.0);
+        let r = doc.connect(RelationKind::LinkType, a, b).unwrap();
+        doc.relation_mut(r).unwrap().label = Some("Connects an operational location to the physical assets currently placed there.".into());
+        let out = screen(
+            Scene {
+                doc: &doc,
+                cursor: None,
+                focus_rel: None,
+                focus_node: Node::Centre,
+                holding: None,
+                picked: &[],
+                camera: (0.0, 0.0),
+                letters: None,
+                insert: None,
+                refused: &[],
+                reshape: None, hover: None, marquee: None,
+                labels: true,
+                grid: false,
+                ink: crate::ui::wire::Ink::Braille,
+            },
+            60,
+            26,
+        );
+        // No row is anywhere near the full sentence's own length — it was broken up, not
+        // left to run the width of the line it sits on.
+        for line in out.lines() {
+            assert!(line.trim().chars().count() <= DEFAULT_LABEL_WRAP, "a row ran past the default wrap width: {line:?}");
+        }
+        assert!(out.contains("Connects"), "{out}");
+        assert!(out.contains("there."), "the last word of the sentence still made it in, on its own line: {out}");
     }
 
     #[test]

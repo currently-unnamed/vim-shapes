@@ -479,18 +479,23 @@ fn build_pages() -> Vec<Page> {
              >                        same shape\n\
              >  right-drag,           the same picker enter/hjkl/enter opens, for a NEW\n\
              >  shape to shape        relation between the two\n\
+             >  right-drag from       pan — the view moves exactly as far and the same way\n\
+             >  empty ground          as the mouse, like dragging the canvas itself by hand\n\
              >  right-click           let go of whatever is in hand — a held handle, a\n\
              >                        relation being carried, or a pick — the same as esc\n\
-             >  scroll                pan the view\n\
+             >  scroll                pan the view, a step at a time\n\
              \n\
              A drag that never moves anything is a click: nothing is written to the\n\
              document until something actually moves, so landing the cursor by mouse\n\
-             costs exactly as little as landing it with hjkl.\n\
+             costs exactly as little as landing it with hjkl. A right-drag that panned\n\
+             is the same distinction the other way — it let go having only moved the\n\
+             view, not the pick or hold it started with, since a pan is a deliberate\n\
+             look elsewhere, not a cancel.\n\
              \n\
-             Dragging from empty ground draws a marquee; letting go picks every shape\n\
-             it touches, the same set V and a motion would. See |relations| for what\n\
-             the picker does once a line is dropped, and |editing| for undo — a mouse\n\
-             drag is one undo step, like any edit.\n\
+             Dragging from empty ground with the LEFT button draws a marquee; letting\n\
+             go picks every shape it touches, the same set V and a motion would. See\n\
+             |relations| for what the picker does once a line is dropped, and |editing|\n\
+             for undo — a mouse drag is one undo step, like any edit.\n\
              \n\
              :debug's \"last mouse\" row says what the last mouse event was, the way\n\
              \"last key\" does for the keyboard — the first thing to check when a click\n\
@@ -684,6 +689,7 @@ fn build_pages() -> Vec<Page> {
              \n\
              >  ^t                   a new tab — asks which kind, then opens the line to name it\n\
              >  :tabnew <kind> [name] the same, in one line\n\
+             >  :tabnew <path>        a diagram :exported with :export <file.diagram>, as a new tab\n\
              >  :tabrename <name>     rename this tab\n\
              >  gt  gT                the next / previous tab\n\
              >  :tab N                go to tab N\n\
@@ -733,13 +739,21 @@ fn build_pages() -> Vec<Page> {
              # :export — the dialog\n\
              \n\
              :export alone opens the export dialog, the questions any diagram tool's\n\
-             image dialog asks: the FORMAT — png, svg, pdf, html, or xml (a draw.io file,\n\
-             to edit on); the STYLE — terminal (the braille picture, the terminal's own)\n\
-             or clean (the drawn one V previews); the FILE, named after the tab; the ZOOM,\n\
-             with the width and height it gives shown and typeable; a TRANSPARENT ground;\n\
-             a light or dark APPEARANCE; the BORDER in cells; the GRID. j/k, i to type,\n\
-             h/l to cycle, enter exports. :export <file.svg> skips the dialog and writes\n\
-             the format the extension names at the defaults.\n"
+             image dialog asks: the FORMAT — png, svg, pdf, html, xml (a draw.io file,\n\
+             to edit on), or diagram (this tab alone, losslessly — see below); the STYLE —\n\
+             terminal (the braille picture, the terminal's own) or clean (the drawn one V\n\
+             previews); the FILE, named after the tab; the ZOOM, with the width and height\n\
+             it gives shown and typeable; a TRANSPARENT ground; a light or dark APPEARANCE;\n\
+             the BORDER in cells; the GRID. j/k, i to type, h/l to cycle, enter exports.\n\
+             :export <file.svg> skips the dialog and writes the format the extension names\n\
+             at the defaults.\n\
+             \n\
+             # :export <file.diagram> — one tab, lossless\n\
+             \n\
+             Every other format is a picture: this one is the tab itself, every element and\n\
+             relation exactly as :w would save it, just on its own rather than wrapped in the\n\
+             workspace it came from. :tabnew <path> reads it back as a new tab — on this\n\
+             session or another — without touching any tab already open. See |tabs|.\n"
                 .to_string(),
         ),
         page(
@@ -748,12 +762,13 @@ fn build_pages() -> Vec<Page> {
              \n\
              >  :w [path]         save — to the file opened, or the path given\n\
              >  :o <path>         open\n\
-             >  :import <path>    a draw.io file, an ArchiMate exchange file, or a coArchi folder\n\
+             >  :import <path>    a draw.io file, an ArchiMate exchange file, a coArchi folder, or a Foundry ontology export\n\
              >  :n                start an empty diagram\n\
              >  :q                quit; asks if there is unsaved work. :q! does not\n\
              >  ZZ  ZQ            :wq and :q!, as vim chords\n\
-             >  :export           the export dialog — png, svg, pdf, xml (draw.io), html\n\
+             >  :export           the export dialog — png, svg, pdf, xml (draw.io), html, diagram\n\
              >  :export <file>    the format the extension names, at the defaults\n\
+             >  :tabnew <path>    a tab exported with :export <file.diagram>, opened as a new tab\n\
              >  V                 preview: the tab as a PNG, opened at once\n\
              \n\
              The file holds every tab (see |tabs|). It is JSON, pretty-printed, and names kinds by their slug —\n\
@@ -761,9 +776,12 @@ fn build_pages() -> Vec<Page> {
              that names an element that is not there is refused whole rather than opened\n\
              half-broken.\n\
              \n\
-             :import reads three other things back, replacing this diagram — a directory\n\
-             means coArchi, otherwise the two file formats are told apart by content, not\n\
-             extension. All three are generous, not exact.\n\
+             :import reads four other things back, replacing this diagram — a directory\n\
+             means coArchi, otherwise the file formats are told apart by content, not\n\
+             extension. All four are generous, not exact. With no path, :import opens a\n\
+             browser instead: j/k pick, enter or l into a folder, h or backspace up, enter\n\
+             on a file imports it, ^enter imports the folder you are standing in (a coArchi\n\
+             model).\n\
              \n\
              A draw.io file — one this app exported, or one from the desktop tool itself.\n\
              A cell this app wrote comes back as the exact kind it left as; a shape from a\n\
@@ -784,6 +802,19 @@ fn build_pages() -> Vec<Page> {
              arranged by layer. A coArchi import also keeps the repository's own folders —\n\
              see |tree| for browsing hundreds of them.\n\
              \n\
+             A Foundry ontology export — the JSON a Foundry stack itself writes: object\n\
+             types, interfaces, action types and link types, organized into type groups.\n\
+             Drawing all of it at once is a tangle, not a diagram, so this import draws\n\
+             nothing: it leaves the diagram empty and keeps the whole export resident. :tree\n\
+             lists every object type and action, one group per folder — flat, since\n\
+             Foundry's own groups are, unlike a coArchi model's nested ones — and picking one\n\
+             starts a fresh tab holding just that resource. From there, e (expand) lists what\n\
+             it is really connected to that is not on the diagram yet — a link to another\n\
+             object type, an action that creates, modifies, deletes or calls a function on\n\
+             it, an interface it implements, a datasource it is backed by — enter adds the\n\
+             one picked, a adds everything shown. A diagram built this way is always exactly\n\
+             the one asked for.\n\
+             \n\
              Either way, run :lint afterward to see what the rules make of what came in.\n\
              \n\
              Unsaved work is a COMPARISON against what was last saved, not a flag: undo\n\
@@ -795,19 +826,21 @@ fn build_pages() -> Vec<Page> {
         ),
         page(
             "tree",
-            "*tree*  browsing a coArchi import's own folders\n\
+            "*tree*  browsing an import's own folders, views or resources\n\
              \n\
              A coArchi model repository organizes its views into folders — Business,\n\
-             Application, whatever the modeller made underneath. A large one imports into\n\
-             hundreds of tabs, and neither the header nor gt / :tab N is a way to find one\n\
-             of them: :tree is. It folds and searches the same folders the repository had,\n\
-             and opens on a folder only if a view is somewhere under it — one holding\n\
-             nothing but elements never diagrammed has nowhere to send you, so it does not\n\
-             appear at all.\n\
+             Application, whatever the modeller made underneath. A Foundry ontology export\n\
+             organizes its object types and actions into type groups instead, flat rather\n\
+             than nested, and nothing is drawn until one is picked — see |files| for why.\n\
+             Either can mean hundreds of rows, and neither the header nor gt / :tab N is a\n\
+             way to find one: :tree is. It folds and searches whichever the import kept, and\n\
+             opens on a folder only if a view or a resource is somewhere under it — one\n\
+             holding nothing but elements never diagrammed, or never picked, has nowhere to\n\
+             send you, so it does not appear at all.\n\
              \n\
-             >  type          search — every folder and view along a matching path, unfolded\n\
+             >  type          search — every folder, view and resource along a matching path\n\
              >  ↑ / ↓         move the selection\n\
-             >  enter  →      open a folder; on a view, jump to its tab and close\n\
+             >  enter  →      open a folder; on a view, jump to its tab; on a resource, start one\n\
              >  ←             fold a folder\n\
              >  esc           close, keeping the tab you were already on\n\
              \n\
@@ -1040,7 +1073,12 @@ fn build_pages() -> Vec<Page> {
          >  v   a        the value type; the API name\n\
          >  J/K          move the row down / up\n\
          >  d            delete\n\
+         >  e            expand — on a Foundry import's foreign key, the object type it points at\n\
          >  esc          back to the diagram\n\
+         \n\
+         e is the same expand a Foundry import's own object type offers on the canvas (see\n\
+         |files|), reached from its foreign key property instead: refused, and said why, on\n\
+         any other row, or on an object type this app did not itself import.\n\
          \n\
          The sheet adds API NAME, PLURAL, STATUS (experimental draws dashed; deprecated fades\n\
          and wears a red ✗ — an x on paper) and VISIBILITY.\n\

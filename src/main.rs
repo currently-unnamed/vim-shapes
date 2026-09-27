@@ -5,6 +5,7 @@ mod drawio_export;
 mod drawio_import;
 mod export;
 mod fonts;
+mod foundry_import;
 mod layout;
 mod model;
 mod ontology;
@@ -12,6 +13,7 @@ mod persistence;
 mod render;
 mod shapes;
 mod ui;
+mod workbench;
 
 use std::io::{self, Stdout};
 

@@ -12,9 +12,11 @@ pub mod cmdline;
 pub mod colour;
 pub mod debug;
 pub mod excmd;
+pub mod expandpick;
 pub mod exportdlg;
 pub mod form;
 pub mod help;
+pub mod importdlg;
 pub mod keymap;
 pub mod layers;
 pub mod manual;
@@ -29,7 +31,9 @@ pub mod theme;
 pub mod tree;
 pub mod wildmenu;
 pub mod wire;
+pub mod workbench;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -46,15 +50,29 @@ fn exportdlg_slug(name: &str) -> String {
     name.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect()
 }
 
-/// Which of the two `:import` formats a file is, by its content rather than its name — a
+/// Which of the file `:import` formats a file is, by its content rather than its name — a
 /// draw.io file's root is always `<mxfile`, and a peek at the first few KB is enough to see
-/// it without reading a large ArchiMate model twice over.
+/// it without reading a large ArchiMate model (or, here, a much larger Foundry ontology
+/// export) twice over.
 fn sniff_is_drawio(path: &std::path::Path) -> Result<bool, String> {
+    Ok(sniff_prefix(path)?.contains("<mxfile"))
+}
+
+/// A Foundry ontology export's own top-level shape: JSON, with `"objectTypes"` — the second
+/// key Foundry itself writes, right after `"version"` — inside a 4 KB prefix. `"actionTypes"`
+/// is a later top-level key, written only after the entire (often many-megabyte) object type
+/// array, so it is never in reach of a cheap prefix read and cannot be part of this check.
+fn sniff_is_foundry_ontology(path: &std::path::Path) -> Result<bool, String> {
+    let prefix = sniff_prefix(path)?;
+    Ok(prefix.trim_start().starts_with('{') && prefix.contains("\"objectTypes\""))
+}
+
+fn sniff_prefix(path: &std::path::Path) -> Result<String, String> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| format!("could not read file: {e}"))?;
     let mut buf = [0u8; 4096];
     let n = f.read(&mut buf).map_err(|e| format!("could not read file: {e}"))?;
-    Ok(String::from_utf8_lossy(&buf[..n]).contains("<mxfile"))
+    Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
 }
 use canvas::Target;
 use keymap::{Avail, Focus, Mode, Prefix, Resolved, Spot, Where};
@@ -71,6 +89,8 @@ enum Confirm {
     CloseTab,
     /// Throw away unsaved work, and then…
     Discard(Pending),
+    /// `d` in the workbench panel — a real `rm`, on a file or a whole folder.
+    DeleteWorkbenchEntry(crate::workbench::Entry),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -153,6 +173,11 @@ enum MouseGesture {
 const HANDLE_HIT: f64 = 0.75;
 /// How close a click has to land on a relation's route to focus it rather than miss it.
 const RELATION_HIT: f64 = 0.6;
+/// How far a hover arrow sits outside its handle — far enough that the two hit-zones
+/// (`HANDLE_HIT` around the handle, `ARROW_HIT` around the arrow) never overlap, so a click
+/// is never ambiguous between "resize" and "open a new connected shape this way."
+const ARROW_GAP: f64 = 1.6;
+const ARROW_HIT: f64 = 0.7;
 
 /// A tab that is not the current one: its name, and everything about it that the app keeps
 /// per diagram, parked until you switch back. The current tab's state lives in `App`'s own
@@ -169,6 +194,11 @@ struct TabSlot {
     redo: Vec<Document>,
     back: Vec<ElementId>,
     forward: Vec<ElementId>,
+    /// Which of this tab's elements came from the resident `ontology` index, and under what
+    /// id — how `e` (expand) knows what a placed element really is in the export, and how
+    /// far it has already grown. A hand-drawn element, or one from any other import, simply
+    /// has no entry.
+    ontology_ids: HashMap<ElementId, String>,
 }
 
 pub struct App {
@@ -223,14 +253,27 @@ pub struct App {
     /// is one; empty otherwise. Never saved: `load_workspace` clears it, since a file this app
     /// wrote back out has no folders of its own to remember.
     model_tree: Vec<crate::archimate_import::ModelNode>,
+    /// The whole of a Foundry ontology export, resident but never drawn in full — same
+    /// lifecycle as `model_tree`, and set alongside it. `None` outside a Foundry import.
+    ontology: Option<crate::foundry_import::Index>,
+    /// The current tab's own `TabSlot::ontology_ids`, live — parked and restored on
+    /// `switch_tab` exactly like `cursor` or `camera`.
+    ontology_ids: HashMap<ElementId, String>,
     tree: Option<tree::State>,
     /// The property browser, on an ontology type's rows, while one is up.
     props: Option<props::State>,
+    /// The architecture workbench — a live folder of diagrams, docked on the left, while one
+    /// is up. Never saved: it is a window onto a folder, not part of any one diagram.
+    workbench: Option<workbench::State>,
     /// The colour picker, over the sheet, while one is up.
     colour: Option<colour::State>,
     /// Colours picked this session, newest first — the picker's recent row.
     recent_colours: Vec<Colour>,
     export: Option<exportdlg::State>,
+    /// The import dialog — up when `:import` is typed with no path.
+    importdlg: Option<importdlg::State>,
+    /// `e` (expand) — up while its list is showing.
+    expandpick: Option<expandpick::State>,
     confirm: Option<Confirm>,
     status: Option<(String, Tone)>,
     /// World coordinates of the top-left cell of the view.
@@ -257,6 +300,10 @@ pub struct App {
     marquee: Option<((f64, f64), (f64, f64))>,
     /// The right button's candidate element for a connection, from `Down` until `Up`.
     connect_from: Option<ElementId>,
+    /// A right-drag's own anchor, in raw screen cells (not world ones, which move under it
+    /// as the camera does) — set on a right `Down` that starts on empty ground, cleared on
+    /// `Up`. `Some` is what tells `mouse_right_drag` to pan instead of trying to connect.
+    pan_from: Option<(u16, u16)>,
     /// What the debugging panel's "last mouse" row shows.
     last_mouse: String,
     search: Option<String>,
@@ -322,8 +369,11 @@ impl App {
             sheet: None,
             layers: None,
             model_tree: Vec::new(),
+            ontology: None,
+            ontology_ids: HashMap::new(),
             tree: None,
             props: None,
+            workbench: None,
             colour: None,
             recent_colours: Vec::new(),
             enhanced_keys: false,
@@ -331,6 +381,8 @@ impl App {
             viewing: false,
             panned: false,
             export: None,
+            importdlg: None,
+            expandpick: None,
             confirm: None,
             status: None,
             camera: (0.0, 0.0),
@@ -342,6 +394,7 @@ impl App {
             mouse_pos: None,
             marquee: None,
             connect_from: None,
+            pan_from: None,
             last_mouse: String::new(),
             search: None,
             back: Vec::new(),
@@ -376,9 +429,11 @@ impl App {
 
     /// Replace everything with a workspace — what opening a file and `:new` both do.
     fn load_workspace(&mut self, ws: Workspace) {
-        // A model tree only means anything for the coArchi import that just made it — the
-        // caller sets `model_tree` again immediately after, if this workspace is one.
+        // A model tree only means anything for the import that just made it — the caller
+        // sets `model_tree` (and, for a Foundry ontology, `ontology`) again immediately
+        // after, if this workspace is one.
         self.model_tree = Vec::new();
+        self.ontology = None;
         self.tree = None;
         self.tabs = ws
             .tabs
@@ -415,6 +470,7 @@ impl App {
             slot.redo = std::mem::take(&mut self.redo);
             slot.back = std::mem::take(&mut self.back);
             slot.forward = std::mem::take(&mut self.forward);
+            slot.ontology_ids = std::mem::take(&mut self.ontology_ids);
         }
         // Leaving a tab drops whatever was half done in it: a relation in hand, a selection.
         self.holding = None;
@@ -430,6 +486,7 @@ impl App {
         self.redo = std::mem::take(&mut slot.redo);
         self.back = std::mem::take(&mut slot.back);
         self.forward = std::mem::take(&mut slot.forward);
+        self.ontology_ids = std::mem::take(&mut slot.ontology_ids);
         self.ensure_cursor();
         self.follow_camera();
     }
@@ -445,6 +502,175 @@ impl App {
         doc.metadata.view = view;
         self.tabs.push(TabSlot { name: format!("diagram {n}"), doc, ..Default::default() });
         self.switch_tab(self.tabs.len() - 1);
+    }
+
+    /// `:tabnew <path>` — a diagram `:export`ed with `Format::Diagram` (or any other single-
+    /// tab file this app itself could open), added as a new tab rather than replacing the
+    /// workspace the way `:import`/`:open` do. Purely additive — every other tab is
+    /// untouched — so, unlike those, this never needs to ask about unsaved work first.
+    fn tabnew_from_path(&mut self, path: PathBuf) {
+        match persistence::load(&path) {
+            Ok(ws) if ws.tabs.len() == 1 => {
+                let Tab { name, diagram } = ws.tabs.into_iter().next().expect("checked len == 1");
+                self.tabs.push(TabSlot { name, doc: diagram, ..Default::default() });
+                self.switch_tab(self.tabs.len() - 1);
+                self.say(format!("opened {} as a new tab", path.display()), Tone::Good);
+            }
+            Ok(ws) => self.say(format!("{} has {} tabs — :open it instead, or :export just one tab and :tabnew that", path.display(), ws.tabs.len()), Tone::Bad),
+            Err(e) => self.say(e.to_string(), Tone::Bad),
+        }
+    }
+
+    /// A `tree::RowKind::Resource` picked: a fresh tab, holding just this one element from
+    /// the resident ontology index, ready to `e`xpand. Does nothing if the id is somehow not
+    /// (or no longer) in the index — the tree is only ever built from it, so that should not
+    /// happen, but a stale row is not worth a panic over.
+    fn place_ontology_resource(&mut self, id: &str) {
+        self.new_tab(View::Ontology);
+        self.checkpoint();
+        let Some(index) = &self.ontology else { return };
+        let new_id = if let Some(o) = index.object_type(id) {
+            crate::foundry_import::add_object_type(&mut self.doc, o)
+        } else if let Some(i) = index.interface(id) {
+            crate::foundry_import::add_interface(&mut self.doc, i)
+        } else if let Some(a) = index.action(id) {
+            crate::foundry_import::add_action_type(&mut self.doc, a)
+        } else {
+            return;
+        };
+        self.ontology_ids.insert(new_id, id.to_string());
+        self.cursor = Some(new_id);
+        let name = self.doc.element(new_id).map(|e| e.display()).unwrap_or_default();
+        self.tabs[self.tab].name = name.clone();
+        self.say(format!("{name} — e to expand what it connects to"), Tone::Good);
+    }
+
+    /// A `tree::RowKind::Link` picked: the tree's shortcut for what picking `from`, then `e`,
+    /// then this same connection, would otherwise take three moves to do — one undo step,
+    /// since `place_ontology_resource`'s own checkpoint already covers everything after it.
+    fn place_ontology_link(&mut self, from: &str, to: &str) {
+        self.place_ontology_resource(from);
+        let Some(source) = self.cursor else { return };
+        let Some(edge) = self.ontology.as_ref().and_then(|idx| idx.find_link(from, to)) else { return };
+        self.add_ontology_connection(source, &edge);
+    }
+
+    /// The other end of an edge from `id`, as an `ElementId` on the current tab — already
+    /// placed (found by its raw id in `ontology_ids`), or placed for the first time now. The
+    /// edge's own kind tells an opaque target (never in the index by itself) a `Calls`
+    /// target is a function and a `BackedBy` target is a datasource.
+    fn place_ontology_connection(&mut self, other_id: &str, via: RelationKind) -> ElementId {
+        if let Some(&existing) = self.ontology_ids.iter().find(|(_, raw)| raw.as_str() == other_id).map(|(el, _)| el) {
+            return existing;
+        }
+        let Some(index) = &self.ontology else { unreachable!("expand only runs with an ontology resident") };
+        let new_id = if let Some(o) = index.object_type(other_id) {
+            crate::foundry_import::add_object_type(&mut self.doc, o)
+        } else if let Some(i) = index.interface(other_id) {
+            crate::foundry_import::add_interface(&mut self.doc, i)
+        } else if let Some(a) = index.action(other_id) {
+            crate::foundry_import::add_action_type(&mut self.doc, a)
+        } else if via == RelationKind::Calls {
+            crate::foundry_import::add_function(&mut self.doc, other_id)
+        } else {
+            crate::foundry_import::add_datasource(&mut self.doc, other_id)
+        };
+        self.ontology_ids.insert(new_id, other_id.to_string());
+        new_id
+    }
+
+    /// `e` — expand: every real connection `source` has in the ontology that is not already
+    /// on this tab. `Vec::new()` if `source` was never placed from the index, or has none
+    /// left — `Where::can_expand` already refused the key in that case.
+    fn ontology_connections(&self, source: ElementId) -> Vec<crate::foundry_import::Edge> {
+        let (Some(raw_id), Some(index)) = (self.ontology_ids.get(&source), &self.ontology) else { return Vec::new() };
+        let placed: std::collections::HashSet<&str> = self.ontology_ids.values().map(String::as_str).collect();
+        index.connections(raw_id, &placed).into_iter().cloned().collect()
+    }
+
+    /// The link a foreign-key row in the property browser backs, if any — `e` there expands
+    /// it, the same connection `e` on the canvas would offer for the object type it belongs
+    /// to. `None` for a row that is not a foreign key, or an element the index does not know.
+    fn props_fk_edge(&self) -> Option<crate::foundry_import::Edge> {
+        let st = self.props.as_ref()?;
+        let raw_id = self.ontology_ids.get(&st.target)?;
+        let api_name = self.doc.element(st.target)?.properties.get(st.sel)?.api_name.as_deref()?;
+        self.ontology.as_ref()?.foreign_key_edge(raw_id, api_name)
+    }
+
+    /// Add one connection `source` has in the ontology: place the far end (or find it, if
+    /// something else already placed it this session), draw the edge in the direction the
+    /// export itself means, and — for a link type — its cardinality and labels too. One
+    /// undo step, the same whether this is called once or, from "expand all", many times.
+    /// Adds one real connection and returns the far end's `ElementId` — already on this tab,
+    /// or placed just now — so a caller can move the cursor there (`e` in the property
+    /// browser does; `expandpick`'s own outcome handling does not need to).
+    fn add_ontology_connection(&mut self, source: ElementId, edge: &crate::foundry_import::Edge) -> Option<ElementId> {
+        let source_raw = self.ontology_ids.get(&source).cloned()?;
+        let other_raw = if edge.from == source_raw { &edge.to } else { &edge.from };
+        let other_id = self.place_ontology_connection(other_raw, edge.kind);
+        let (from_id, to_id) = if edge.from == source_raw { (source, other_id) } else { (other_id, source) };
+        let Ok(rel_id) = self.doc.connect(edge.kind, from_id, to_id) else { return Some(other_id) };
+        if edge.kind == RelationKind::LinkType {
+            crate::foundry_import::apply_link_notation(&mut self.doc, rel_id, edge);
+        }
+        self.place_expanded(source, other_id, edge.prefers_vertical());
+        Some(other_id)
+    }
+
+    /// Where a freshly expanded neighbour lands. Side by side by default — a column to the
+    /// right of the element being expanded, stacked downward if more than one lands there.
+    /// But a line drawn straight across to it carries this edge's own label, and a label too
+    /// long for that gutter (`Edge::prefers_vertical`) bleeds into the boxes on either side of
+    /// it, or — once elements stop lining up — smears across a diagonal. So a long label gets
+    /// a straight line under the element instead, where it has the room a sentence needs.
+    /// Neither is a general layout, just enough that expanding one element's neighbourhood
+    /// never has to fight the rest of the diagram for space.
+    fn place_expanded(&mut self, source: ElementId, new_el: ElementId, vertical: bool) {
+        let Some(src) = self.doc.element(source) else { return };
+        let (sx, sy, sw, sh) = (src.x, src.y, src.w, src.h);
+        let (x, y) = if vertical {
+            let below: f64 = self
+                .ontology_ids
+                .keys()
+                .filter_map(|&id| self.doc.element(id))
+                .filter(|e| e.id != new_el && e.x < sx + sw && e.x + e.w > sx)
+                .map(|e| e.y + e.h + layout::GUT_Y)
+                .fold(sy + sh + layout::GUT_Y, f64::max);
+            (sx, below)
+        } else {
+            let below: f64 = self
+                .ontology_ids
+                .keys()
+                .filter_map(|&id| self.doc.element(id))
+                .filter(|e| e.id != new_el && e.x >= sx + sw)
+                .map(|e| e.y + e.h + layout::GUT_Y)
+                .fold(sy, f64::max);
+            (sx + sw + layout::GUT_X, below)
+        };
+        if let Some(e) = self.doc.element_mut(new_el) {
+            e.x = x;
+            e.y = y;
+        }
+    }
+
+    /// `e`: open the list of what the cursor's element really connects to. `Where::can_expand`
+    /// already refused the key if there is nothing to show, so this is never called empty.
+    fn open_expand(&mut self) {
+        let Some(source) = self.cursor else { return };
+        let edges = self.ontology_connections(source);
+        let Some(index) = &self.ontology else { return };
+        let source_raw = self.ontology_ids.get(&source).cloned().unwrap_or_default();
+        let rows: Vec<expandpick::Row> = edges
+            .into_iter()
+            .map(|edge| {
+                let other = if edge.from == source_raw { &edge.to } else { &edge.from };
+                let other_kind = index.kind_of(other, edge.kind);
+                let other_label = index.display_name(other, edge.kind);
+                expandpick::Row { edge, other_kind, other_label }
+            })
+            .collect();
+        self.expandpick = Some(expandpick::State::new(rows));
     }
 
     /// Close the current tab. The last tab cannot be closed — `:new` is how you start over.
@@ -475,15 +701,18 @@ impl App {
         Ok(())
     }
 
-    /// Import a draw.io file, an ArchiMate exchange file, or a coArchi model folder, replacing
-    /// whatever is here. The caller has already decided that is fine. A directory is coArchi;
-    /// otherwise the two file formats are told apart by content, not extension — a draw.io
-    /// file's root is always `<mxfile`, and that is the only thing checked; anything else is
-    /// handed to the ArchiMate reader, which refuses outright if it isn't one either. Unlike
-    /// `open_path`, this never sets `self.path` — none of the three is what `:w` would save
+    /// Import a draw.io file, an ArchiMate exchange file, a coArchi model folder, or a
+    /// Foundry ontology export, replacing whatever is here. The caller has already decided
+    /// that is fine. A directory is coArchi; otherwise the formats are told apart by content,
+    /// not extension — a draw.io file's root is always `<mxfile`, a Foundry export is JSON
+    /// with `objectTypes` and `actionTypes` at its top level, and anything else is handed to
+    /// the ArchiMate reader, which refuses outright if it isn't one either. Unlike
+    /// `open_path`, this never sets `self.path` — none of the four is what `:w` would save
     /// back to, so a bare `:w` afterward asks for a name rather than silently writing JSON
     /// over whatever was just read.
     pub fn import_path(&mut self, path: PathBuf) -> Result<(), String> {
+        let mut ontology = None;
+        let mut open_tree = false;
         let (ws, tree) = if path.is_dir() {
             let (ws, tree) = crate::archimate_import::import_coarchi(&path).map_err(|e| e.to_string())?;
             persistence::validate_workspace(&ws).map_err(|why| format!("{}: {why}", path.display()))?;
@@ -493,6 +722,15 @@ impl App {
             persistence::validate(&doc).map_err(|why| format!("{}: {why}", path.display()))?;
             let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "diagram 1".into());
             (Workspace::single(name, doc), Vec::new())
+        } else if sniff_is_foundry_ontology(&path)? {
+            // Everything a real export holds is a tangle if drawn at once — so it starts
+            // empty, and the tree opens on its own: there is nothing else to do yet but pick
+            // the first resource to grow a diagram from.
+            let index = crate::foundry_import::import(&path).map_err(|e| e.to_string())?;
+            let tree = index.tree();
+            ontology = Some(index);
+            open_tree = true;
+            (Workspace::new(), tree)
         } else {
             let ws = crate::archimate_import::import(&path).map_err(|e| e.to_string())?;
             persistence::validate_workspace(&ws).map_err(|why| format!("{}: {why}", path.display()))?;
@@ -500,9 +738,13 @@ impl App {
         };
         self.load_workspace(ws);
         self.model_tree = tree;
+        self.ontology = ontology;
         self.saved = self.serialized();
         self.path = None;
         self.say(format!("imported {}", path.display()), Tone::Good);
+        if open_tree {
+            self.tree = Some(tree::State::new());
+        }
         Ok(())
     }
 
@@ -775,6 +1017,7 @@ impl App {
             held: self.reshape.is_some_and(|r| r.held),
             patched: self.reshape.zip(self.cursor).is_some_and(|(r, id)| !self.doc.at_port(id, r.handle).is_empty()),
             moving_end: self.reshape.is_some_and(|r| r.moving.is_some()),
+            can_expand: self.cursor.is_some_and(|id| !self.ontology_connections(id).is_empty()),
         }
     }
 
@@ -1677,6 +1920,46 @@ impl App {
             }
             return;
         }
+        if let Some(st) = &mut self.importdlg {
+            match st.key(k) {
+                importdlg::Outcome::Nothing => {}
+                importdlg::Outcome::Cancel => self.importdlg = None,
+                importdlg::Outcome::Import(path) => {
+                    self.importdlg = None;
+                    if self.dirty() {
+                        self.confirm = Some(Confirm::Discard(Pending::Import(path)));
+                    } else if let Err(e) = self.import_path(path) {
+                        self.say(e, Tone::Bad);
+                    }
+                }
+            }
+            return;
+        }
+        if let Some(st) = &mut self.expandpick {
+            let outcome = st.key(k);
+            let rows: Vec<crate::foundry_import::Edge> = st.rows.iter().map(|r| r.edge.clone()).collect();
+            match outcome {
+                expandpick::Outcome::Nothing => {}
+                expandpick::Outcome::Cancel => self.expandpick = None,
+                expandpick::Outcome::One(i) => {
+                    self.expandpick = None;
+                    if let Some(source) = self.cursor {
+                        self.checkpoint();
+                        self.add_ontology_connection(source, &rows[i]);
+                    }
+                }
+                expandpick::Outcome::All => {
+                    self.expandpick = None;
+                    if let Some(source) = self.cursor {
+                        self.checkpoint();
+                        for edge in &rows {
+                            self.add_ontology_connection(source, edge);
+                        }
+                    }
+                }
+            }
+            return;
+        }
 
         if self.manual.is_some() {
             if k.code == KeyCode::Char(':') {
@@ -1715,6 +1998,17 @@ impl App {
         }
         if self.props.is_some() {
             self.props_key(k);
+            return;
+        }
+        if self.workbench.is_some() {
+            // Deleting a row arms the app's own confirm while the panel stays open — check
+            // it here rather than letting the later, general `confirm` check ever see it,
+            // since this branch would otherwise always win first.
+            if self.confirm.is_some() {
+                self.confirm_key(k);
+            } else {
+                self.workbench_key(k);
+            }
             return;
         }
         if self.colour.is_some() {
@@ -2017,6 +2311,7 @@ impl App {
             }
             (_, KeyCode::Char('i')) => self.reshape = Some(Reshape { handle: 3, held: false, moving: None }),
             (_, KeyCode::Char('o')) => self.open_off(None),
+            (_, KeyCode::Char('e')) => self.open_expand(),
             (_, KeyCode::Char('u')) => self.undo(),
             (_, KeyCode::Char('y')) => self.yank(),
             (_, KeyCode::Char('p')) => self.paste(),
@@ -2075,6 +2370,15 @@ impl App {
         Some((self.camera.0 + (col - b.x) as f64, self.camera.1 + (row - b.y) as f64))
     }
 
+    /// The hover arrow under a point, if one is showing. Checked only against `self.hover`'s
+    /// element — the only one currently painting arrows, per `canvas.rs`'s hover-fallback
+    /// branch — since an arrow sits outside its box, where `element_at` would miss it.
+    fn hit_arrow(&self, p: (f64, f64)) -> Option<(ElementId, usize)> {
+        let id = self.hover?;
+        let e = self.doc.element(id)?;
+        e.arrow_at(p, ARROW_HIT, ARROW_GAP).map(|d| (id, d))
+    }
+
     /// The handle of the frontmost element under a point, if the point is close enough to
     /// one. A click near a box's corner or edge is close enough to it that `element_at` would
     /// answer with the same element anyway, so there is no separate "which element's handles"
@@ -2115,9 +2419,12 @@ impl App {
             && self.layers.is_none()
             && self.tree.is_none()
             && self.props.is_none()
+            && self.workbench.is_none()
             && self.colour.is_none()
             && !self.sheet.as_ref().is_some_and(|s| s.focused)
             && self.export.is_none()
+            && self.importdlg.is_none()
+            && self.expandpick.is_none()
             && self.cmdline.is_none()
             && self.confirm.is_none()
             && self.insert.is_none()
@@ -2148,8 +2455,8 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => self.mouse_left_down(p),
             MouseEventKind::Drag(MouseButton::Left) => self.mouse_left_drag(p),
             MouseEventKind::Up(MouseButton::Left) => self.mouse_left_up(p),
-            MouseEventKind::Down(MouseButton::Right) => self.mouse_right_down(p),
-            MouseEventKind::Drag(MouseButton::Right) => self.mouse_right_drag(p),
+            MouseEventKind::Down(MouseButton::Right) => self.mouse_right_down(p, (m.column, m.row)),
+            MouseEventKind::Drag(MouseButton::Right) => self.mouse_right_drag(p, (m.column, m.row)),
             MouseEventKind::Up(MouseButton::Right) => self.mouse_right_up(p),
             MouseEventKind::Moved => self.hover = self.doc.element_at(p),
             MouseEventKind::ScrollUp => self.pan(0.0, -PAN_Y),
@@ -2165,6 +2472,14 @@ impl App {
     fn mouse_left_down(&mut self, p: (f64, f64)) {
         self.status = None;
         self.mouse_dragging = false;
+        // Checked before `hit_handle`: an arrow sits `ARROW_GAP` outside its handle, so the
+        // two never overlap, but the arrow is the one meant first when hovering shows both.
+        if let Some((id, dir)) = self.hit_arrow(p) {
+            self.set_cursor(id);
+            self.open_off(Some(dir));
+            self.mouse_gesture = None;
+            return;
+        }
         if let Some((id, handle)) = self.hit_handle(p) {
             self.set_cursor(id);
             match self.doc.at_port(id, handle).first().copied() {
@@ -2286,14 +2601,27 @@ impl App {
         self.mouse_dragging = false;
     }
 
-    fn mouse_right_down(&mut self, p: (f64, f64)) {
+    fn mouse_right_down(&mut self, p: (f64, f64), raw: (u16, u16)) {
         self.status = None;
         self.mouse_dragging = false;
         self.connect_from = self.doc.element_at(p);
+        // Empty ground: this might turn into a pan rather than a connection. Raw screen
+        // cells, not `p` — `p` is a world position, and the world moves under the mouse the
+        // moment a pan starts, which would make a delta taken from it chase its own tail.
+        self.pan_from = self.connect_from.is_none().then_some(raw);
     }
 
-    fn mouse_right_drag(&mut self, p: (f64, f64)) {
+    /// A right-drag starting on empty ground pans: the view moves with the mouse, exactly
+    /// as far and in the same direction, like a hand dragging the canvas rather than a
+    /// window looking at it. One from an element instead connects it to whatever the mouse
+    /// ends up over — see `mouse_right_up`.
+    fn mouse_right_drag(&mut self, p: (f64, f64), raw: (u16, u16)) {
         self.mouse_dragging = true;
+        if let Some((fx, fy)) = self.pan_from {
+            self.pan(fx as f64 - raw.0 as f64, fy as f64 - raw.1 as f64);
+            self.pan_from = Some(raw);
+            return;
+        }
         let Some(from) = self.connect_from else { return };
         if self.holding.is_none() {
             self.holding = Some(from);
@@ -2303,12 +2631,17 @@ impl App {
 
     /// A right-drag between two elements connects them, reusing the keyboard's own
     /// hold/carry/drop verb (`drop_relation`) — the mouse just compresses it into one
-    /// gesture. Anything else — a plain right-click, or a drag that never found an element to
-    /// hold — cancels whatever is active instead: a held or moving reshape, then a held
-    /// relation, then a non-empty pick.
+    /// gesture. A right-drag that panned the view lets go having only done that — a pan is a
+    /// deliberate move, not a cancel, and undoing the current pick or hold as a side effect
+    /// of it would be a surprise. Anything else — a plain right-click, or a drag that never
+    /// found an element to hold or ground to pan — cancels whatever is active instead: a
+    /// held or moving reshape, then a held relation, then a non-empty pick.
     fn mouse_right_up(&mut self, _p: (f64, f64)) {
+        let panned = self.mouse_dragging && self.pan_from.is_some();
         let attempted = self.mouse_dragging && self.holding.is_some();
-        if attempted {
+        if panned {
+            // Already done, in `mouse_right_drag` — nothing left to do but let go below.
+        } else if attempted {
             let from = self.holding.expect("attempted implies holding");
             let to = self.cursor.unwrap_or(from);
             if to != from {
@@ -2325,6 +2658,7 @@ impl App {
             self.selection.clear();
         }
         self.connect_from = None;
+        self.pan_from = None;
         self.mouse_dragging = false;
     }
 
@@ -2457,6 +2791,229 @@ impl App {
                         self.undo.pop();
                         self.say(why, Tone::Bad);
                     }
+                }
+            }
+            KeyCode::Char('e') => {
+                let Some(edge) = self.props_fk_edge() else {
+                    self.say("not a foreign key — nothing to expand", Tone::Bad);
+                    return;
+                };
+                self.props = None;
+                self.checkpoint();
+                if let Some(new_id) = self.add_ontology_connection(target, &edge) {
+                    self.cursor = Some(new_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `:workbench <path>` — create the folder if it is not there yet (a brand-new team
+    /// folder is a normal case, not an error), remember it in the config as just accessed,
+    /// and open the panel on it.
+    fn open_workbench(&mut self, path: PathBuf) {
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            self.say(format!("{}: {e}", path.display()), Tone::Bad);
+            return;
+        }
+        self.workbench = Some(workbench::State::opened(path.clone()));
+        match crate::config::touch_workbench(&path) {
+            Ok(()) => self.say(format!("workbench: {}", path.display()), Tone::Good),
+            Err(e) => self.say(format!("workbench: {} — not remembered: {e}", path.display()), Tone::Note),
+        }
+    }
+
+    /// A diagram row picked in the workbench: every tab in that file, appended — not just
+    /// whichever was `current` when it was saved — since a workbench leaf is one file
+    /// deliberately allowed to hold a whole family of related diagrams. Purely additive, the
+    /// same as `tabnew_from_path`, so unlike `:open` this never needs to ask about unsaved
+    /// work first.
+    fn workbench_open_diagram(&mut self, path: PathBuf) {
+        match persistence::load(&path) {
+            Ok(ws) => {
+                let first_new = self.tabs.len();
+                for Tab { name, diagram } in ws.tabs {
+                    self.tabs.push(TabSlot { name, doc: diagram, ..Default::default() });
+                }
+                self.switch_tab(first_new);
+                self.say(format!("opened {}", path.display()), Tone::Good);
+            }
+            Err(e) => self.say(e.to_string(), Tone::Bad),
+        }
+    }
+
+    /// `d`, confirmed: a real `rm` on disk, then the panel rescans.
+    fn workbench_delete(&mut self, entry: crate::workbench::Entry) {
+        let name = entry.name.clone();
+        if let Err(e) = crate::workbench::delete(&entry) {
+            self.say(format!("{name}: {e}"), Tone::Bad);
+            return;
+        }
+        if let Some(st) = &mut self.workbench {
+            st.rescan();
+            let n = st.rows().len();
+            st.sel = st.sel.min(n.saturating_sub(1));
+            if st.grabbed.as_ref().is_some_and(|g| g.path == entry.path) {
+                st.grabbed = None;
+            }
+        }
+        self.say(format!("{name} deleted"), Tone::Note);
+    }
+
+    /// `n`/`N`/`r`, typed and committed: create a diagram or a folder in `dir`, or rename
+    /// `selected` — whichever `what` says. A plain function rather than more `workbench_key`
+    /// inline, since it needs to call back into `self.say` after the fs op, and `workbench_key`
+    /// already holds a `&mut self.workbench` borrow when this is reached.
+    fn workbench_commit_name(&mut self, what: workbench::Typing, text: String, dir: Option<PathBuf>, selected: Option<workbench::Row>) {
+        let result = match what {
+            workbench::Typing::NewDiagram => dir.ok_or_else(|| "no folder to add it to".to_string()).and_then(|d| crate::workbench::new_diagram(&d, &text).map_err(|e| e.to_string())).map(|_| format!("{text}.json added")),
+            workbench::Typing::NewFolder => dir.ok_or_else(|| "no folder to add it to".to_string()).and_then(|d| crate::workbench::new_folder(&d, &text).map_err(|e| e.to_string())).map(|_| format!("{text} added")),
+            workbench::Typing::Rename => selected.ok_or_else(|| "nothing selected".to_string()).and_then(|row| crate::workbench::rename(&row.entry(), &text).map_err(|e| e.to_string())).map(|_| format!("renamed to {text}")),
+        };
+        match result {
+            Ok(msg) => {
+                if let Some(st) = &mut self.workbench {
+                    st.rescan();
+                }
+                self.say(msg, Tone::Good);
+            }
+            Err(e) => self.say(e, Tone::Bad),
+        }
+    }
+
+    /// `p`: put whatever `m` grabbed into the folder under the cursor now.
+    fn workbench_put(&mut self) {
+        let Some(st) = &mut self.workbench else { return };
+        let Some(grabbed) = st.grabbed.clone() else {
+            self.say("nothing grabbed — m on a row first", Tone::Bad);
+            return;
+        };
+        let Some(row) = st.selected_row() else { return };
+        if !matches!(row.kind, workbench::RowKind::Folder { .. }) {
+            self.say("p lands on a folder", Tone::Bad);
+            return;
+        }
+        if row.path == grabbed.path || row.path.starts_with(&grabbed.path) {
+            self.say("can't move a folder into itself", Tone::Bad);
+            return;
+        }
+        let dest = row.path.clone();
+        match crate::workbench::move_to(&grabbed, &dest) {
+            Ok(_) => {
+                if let Some(st) = &mut self.workbench {
+                    st.grabbed = None;
+                    st.rescan();
+                    st.expand(&dest);
+                }
+                self.say(format!("{} moved", grabbed.name), Tone::Good);
+            }
+            Err(e) => self.say(format!("{}: {e}", grabbed.name), Tone::Bad),
+        }
+    }
+
+    /// The workbench panel's keys — picking a recent folder when none is open yet, typing a
+    /// new name, or navigating and acting on the tree.
+    fn workbench_key(&mut self, k: KeyEvent) {
+        let Some(st) = &mut self.workbench else { return };
+
+        if st.root.is_none() {
+            let n = st.recents.len();
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.workbench = None,
+                KeyCode::Char('j') | KeyCode::Down => st.move_by(1, n),
+                KeyCode::Char('k') | KeyCode::Up => st.move_by(-1, n),
+                KeyCode::Enter => {
+                    if let Some(path) = st.recents.get(st.sel).cloned() {
+                        self.open_workbench(path);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Computed before `st.editing` might be borrowed below — a method call on `st`
+        // borrows the whole of it, which a live `&mut st.editing` binding would refuse.
+        let dir = st.current_dir();
+        let selected = st.selected_row();
+
+        if let Some((what, buf)) = &mut st.editing {
+            match k.code {
+                KeyCode::Backspace => {
+                    buf.pop();
+                }
+                KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => buf.push(c),
+                KeyCode::Esc => st.editing = None,
+                KeyCode::Enter => {
+                    let what = *what;
+                    let text = buf.trim().to_string();
+                    st.editing = None;
+                    if text.is_empty() {
+                        self.say("needs a name", Tone::Bad);
+                        return;
+                    }
+                    self.workbench_commit_name(what, text, dir, selected);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match k.code {
+            KeyCode::Esc if st.grabbed.is_some() => st.grabbed = None,
+            KeyCode::Esc | KeyCode::Char('q') => self.workbench = None,
+            KeyCode::Char(':') => {
+                self.workbench = None;
+                self.cmdline = Some(cmdline::State::new(':'));
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let n = st.rows().len();
+                st.move_by(1, n);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                let n = st.rows().len();
+                st.move_by(-1, n);
+            }
+            KeyCode::Enter => {
+                let Some(row) = st.selected_row() else { return };
+                match row.kind {
+                    workbench::RowKind::Folder { .. } => st.toggle_expanded(&row.path),
+                    workbench::RowKind::Diagram => {
+                        let path = row.path;
+                        self.workbench_open_diagram(path);
+                    }
+                }
+            }
+            KeyCode::Right => {
+                if let Some(row) = st.selected_row()
+                    && matches!(row.kind, workbench::RowKind::Folder { expanded: false })
+                {
+                    st.expand(&row.path);
+                }
+            }
+            KeyCode::Left => {
+                if let Some(row) = st.selected_row()
+                    && matches!(row.kind, workbench::RowKind::Folder { expanded: true })
+                {
+                    st.toggle_expanded(&row.path);
+                }
+            }
+            KeyCode::Char('n') => st.editing = Some((workbench::Typing::NewDiagram, String::new())),
+            KeyCode::Char('N') => st.editing = Some((workbench::Typing::NewFolder, String::new())),
+            KeyCode::Char('r') => {
+                let name = st.selected_row().map(|r| r.name).unwrap_or_default();
+                let stem = name.strip_suffix(".json").map(str::to_string).unwrap_or(name);
+                st.editing = Some((workbench::Typing::Rename, stem));
+            }
+            KeyCode::Char('m') => {
+                if let Some(row) = st.selected_row() {
+                    st.grabbed = Some(row.entry());
+                }
+            }
+            KeyCode::Char('p') => self.workbench_put(),
+            KeyCode::Char('d') => {
+                if let Some(row) = st.selected_row() {
+                    self.confirm = Some(Confirm::DeleteWorkbenchEntry(row.entry()));
                 }
             }
             _ => {}
@@ -2633,6 +3190,14 @@ impl App {
                 match row.kind {
                     tree::RowKind::Folder { .. } => tree::toggle(&mut self.model_tree, &row.path),
                     tree::RowKind::View { tab_index } => self.jump_to_tab(tab_index, &row.label),
+                    tree::RowKind::Resource { id, .. } => {
+                        self.tree = None;
+                        self.place_ontology_resource(&id);
+                    }
+                    tree::RowKind::Link { from, to } => {
+                        self.tree = None;
+                        self.place_ontology_link(&from, &to);
+                    }
                 }
             }
             _ => {}
@@ -2839,6 +3404,7 @@ impl App {
             Confirm::DeletePicked => self.delete_picked(),
             Confirm::CloseTab => self.close_tab(),
             Confirm::Discard(p) => self.discard_then(p),
+            Confirm::DeleteWorkbenchEntry(node) => self.workbench_delete(node),
         }
     }
 
@@ -3126,7 +3692,7 @@ impl App {
             }
             excmd::Op::Import => {
                 if arg.is_empty() {
-                    self.say("usage: :import <file.drawio>", Tone::Bad);
+                    self.importdlg = Some(importdlg::State::new());
                     return;
                 }
                 let path = PathBuf::from(arg);
@@ -3230,9 +3796,10 @@ impl App {
                 self.export_now(&o, &path);
             }
             excmd::Op::TabNew => {
-                let (kind, name) = match arg.split_once(char::is_whitespace) {
-                    Some((k, n)) => (k.trim(), n.trim()),
-                    None => (arg.as_str(), ""),
+                let trimmed = arg.trim();
+                let (kind, name) = match trimmed.split_once(char::is_whitespace) {
+                    Some((k, n)) => (k, n.trim()),
+                    None => (trimmed, ""),
                 };
                 let view = match kind {
                     "" => {
@@ -3241,8 +3808,12 @@ impl App {
                     }
                     "freeform" | "f" => View::Freeform,
                     "architecture" | "a" | "arch" => View::Free,
-                    other => {
-                        self.say(format!("a tab is freeform or architecture, not {other:?}"), Tone::Bad);
+                    // Not a kind word — try it as a path, the whole argument (a kind takes
+                    // a name after it; a path is not split apart looking for one), the same
+                    // way vim's own :tabnew <file> opens a file into a new tab rather than
+                    // starting one empty.
+                    _ => {
+                        self.tabnew_from_path(PathBuf::from(trimmed));
                         return;
                     }
                 };
@@ -3316,12 +3887,26 @@ impl App {
             }
             excmd::Op::Tree => {
                 if self.model_tree.is_empty() {
-                    self.say("no model tree — :import a coArchi model folder first", Tone::Bad);
+                    self.say("no model tree — :import a coArchi model folder or a Foundry ontology export first", Tone::Bad);
                 } else {
                     self.tree = match self.tree.take() {
                         Some(_) => None,
                         None => Some(tree::State::new()),
                     };
+                }
+            }
+            excmd::Op::Workbench => {
+                if self.workbench.is_some() {
+                    self.workbench = None;
+                } else if !arg.is_empty() {
+                    self.open_workbench(PathBuf::from(arg));
+                } else {
+                    let recents: Vec<PathBuf> = crate::config::load().workbenches.into_iter().map(PathBuf::from).collect();
+                    if recents.is_empty() {
+                        self.say("usage: :workbench <path> — no workbench opened before to pick from", Tone::Bad);
+                    } else {
+                        self.workbench = Some(workbench::State::recents(recents));
+                    }
                 }
             }
             excmd::Op::Sheet => {
@@ -3504,7 +4089,13 @@ impl App {
             );
             return;
         }
-        let [top, full, foot] = Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
+        let [top, full0, foot] = Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
+        // The workbench docks on the left when there is room left over for the right-hand
+        // dock's own, unmodified `DOCK_MIN` check below — so a very narrow terminal keeps the
+        // sheet/layers/props logic exactly as it was, and only the workbench gives way to a
+        // float instead.
+        let left_docked = self.workbench.is_some() && full0.width >= workbench::WIDTH + sheet::DOCK_MIN;
+        let full = if left_docked { Rect { x: full0.x + workbench::WIDTH, width: full0.width - workbench::WIDTH, ..full0 } } else { full0 };
         // The sheet follows the cursor: point it at whatever is under the cursor now.
         let target = self.sheet_target();
         if let Some(sh) = &mut self.sheet
@@ -3565,6 +4156,14 @@ impl App {
             let area = chrome::centered(body, tree::WIDTH.max(48), tree::height(body.height));
             f.render_widget(tree::Browser { state: st, nodes: &self.model_tree }, area);
         }
+        if let Some(st) = &self.workbench {
+            let area = if left_docked {
+                Rect { x: full0.x, y: full.y, width: workbench::WIDTH, height: full.height }
+            } else {
+                chrome::centered(body, workbench::WIDTH.max(48), workbench::height(body.height))
+            };
+            f.render_widget(workbench::Browser { state: st }, area);
+        }
         let layers_h = self.layers.as_ref().map_or(0, |_| (self.doc.layers.len() as u16 + 6).min(full.height));
         let props_h = self.props.as_ref().map_or(0, |p| props::height(self.doc.element(p.target).map_or(0, |e| e.properties.len()), full.height.saturating_sub(layers_h)));
         let browser_h = layers_h + props_h;
@@ -3605,6 +4204,14 @@ impl App {
         if let Some(d) = &self.export {
             let area = chrome::centered(body, exportdlg::WIDTH, exportdlg::HEIGHT);
             f.render_widget(exportdlg::Dialog { state: d, doc: &self.doc }, area);
+        }
+        if let Some(d) = &self.importdlg {
+            let area = chrome::centered(body, importdlg::WIDTH, importdlg::HEIGHT);
+            f.render_widget(importdlg::Dialog { state: d }, area);
+        }
+        if let Some(d) = &self.expandpick {
+            let area = chrome::centered(body, expandpick::WIDTH, expandpick::height(d.rows.len()));
+            f.render_widget(expandpick::Dialog { state: d }, area);
         }
         if self.debug {
             let rows = self.debug_rows();
@@ -3672,9 +4279,12 @@ impl App {
             (self.layers.is_some(), "layers"),
             (self.tree.is_some(), "tree"),
             (self.props.is_some(), "props"),
+            (self.workbench.is_some(), "workbench"),
             (self.help.is_some(), "help"),
             (self.manual.is_some(), "manual"),
             (self.export.is_some(), "export"),
+            (self.importdlg.is_some(), "importdlg"),
+            (self.expandpick.is_some(), "expandpick"),
             (self.tabpick.is_some(), "tabpick"),
             (self.start.is_some(), "start"),
             (self.confirm.is_some(), "confirm"),
@@ -3769,6 +4379,10 @@ impl App {
                 Confirm::DeletePicked => format!(" delete {} picked elements and their relations? d again, or y/n ", self.selection.len()),
                 Confirm::CloseTab => format!(" close {:?} — its diagram is not saved. close anyway? y/n ", self.tab_name()),
                 Confirm::Discard(p) => format!(" unsaved changes — {} anyway? y/n ", p.verb()),
+                Confirm::DeleteWorkbenchEntry(entry) => match entry.kind {
+                    crate::workbench::NodeKind::Folder => format!(" delete the folder {:?} and everything in it? y/n ", entry.name),
+                    crate::workbench::NodeKind::Diagram => format!(" delete {:?}? y/n ", entry.name),
+                },
             };
             strip(q, theme::t().yellow)
         } else if let Some(cl) = &self.cmdline {
@@ -4289,6 +4903,328 @@ mod tests {
         assert!(a.tree.is_none(), "picking a view closes the tree");
         assert_eq!(a.tab_name(), "Billing Overview");
         assert_eq!(a.doc.elements[0].label, "CRM");
+    }
+
+    /// A small fixture whose one link type gives an object type something to `e`xpand.
+    fn foundry_fixture_json(padding: &str) -> String {
+        format!(
+            r#"{{
+                "version": 2,
+                "typeGroups": [{{"rid": "g.crm", "displayMetadata": {{"displayName": "CRM"}}}}],
+                "objectTypes": [
+                    {{"id": "ot.customer", "apiName": "Customer", "displayMetadata": {{"displayName": "Customer", "description": "{padding}"}},
+                     "status": {{"type": "active"}}, "typeGroups": ["g.crm"], "interfaces": [],
+                     "primaryKeys": [], "titlePropertyId": null, "properties": [], "datasources": []}},
+                    {{"id": "ot.order", "apiName": "Order", "displayMetadata": {{"displayName": "Order"}},
+                     "status": {{"type": "active"}}, "typeGroups": ["g.crm"], "interfaces": [],
+                     "primaryKeys": [], "titlePropertyId": null, "properties": [], "datasources": []}}
+                ],
+                "interfaces": [], "actionTypes": [], "sharedProperties": [],
+                "relations": [{{"description": null, "definition": {{"type": "oneToMany", "oneToMany": {{
+                    "objectTypeIdOneSide": "ot.customer", "objectTypeIdManySide": "ot.order",
+                    "oneToManyLinkMetadata": {{"apiName": "orders"}}, "manyToOneLinkMetadata": {{"apiName": "customer"}}
+                }}}}}}]
+            }}"#
+        )
+    }
+
+    #[test]
+    fn import_leaves_the_diagram_empty_and_the_tree_lists_resources_by_group() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("vim-shapes-ontology-{}.json", std::process::id()));
+        // A real export's `actionTypes` key comes after the entire, often many-megabyte,
+        // `objectTypes` array — nowhere near a cheap prefix read. The padding below pushes
+        // it (and `interfaces`/`relations`) well past 4 KB, so this test would have caught
+        // the bug where the content sniff required `actionTypes` inside that prefix too and
+        // silently fell through to the ArchiMate reader on every real file.
+        std::fs::write(&path, foundry_fixture_json(&"x".repeat(8192))).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("import {}", path.display()));
+        std::fs::remove_file(&path).ok();
+        assert!(a.ontology.is_some(), "the resident index is kept, not drawn");
+        assert!(!a.model_tree.is_empty(), "the tree lists resources by group");
+        assert_eq!(a.doc.elements.len(), 0, "nothing is placed until a resource is picked — no more tangle");
+        assert_eq!(a.tab_name(), "diagram 1");
+        assert!(a.tree.is_some(), "the tree opens on its own — nothing else to do yet but pick a resource");
+
+        let rows = tree::rows(&a.model_tree, "");
+        // CRM, opened, holds Customer and Order as individually pickable resources.
+        assert!(matches!(&rows[0].kind, tree::RowKind::Folder { .. }));
+        assert_eq!(rows[0].label, "CRM");
+        key(&mut a, KeyCode::Right);
+        let opened = tree::rows(&a.model_tree, "");
+        let customer = opened.iter().find(|r| r.label == "Customer").expect("Customer is a resource of its own");
+        assert!(matches!(&customer.kind, tree::RowKind::Resource { .. }));
+    }
+
+    #[test]
+    fn picking_a_resource_starts_a_fresh_tab_and_e_expands_its_real_connections() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("vim-shapes-ontology-expand-{}.json", std::process::id()));
+        std::fs::write(&path, foundry_fixture_json("")).unwrap();
+        let mut a = app();
+        a.run_excmd(format!("import {}", path.display()));
+        std::fs::remove_file(&path).ok();
+        assert!(a.tree.is_some(), "the tree opens on its own after a Foundry import");
+
+        key(&mut a, KeyCode::Right); // open the CRM folder
+        let rows = tree::rows(&a.model_tree, "");
+        let i = rows.iter().position(|r| r.label == "Customer").unwrap();
+        a.tree.as_mut().unwrap().sel = i;
+        key(&mut a, KeyCode::Enter);
+
+        assert!(a.tree.is_none(), "picking a resource closes the tree");
+        assert_eq!(a.tab_name(), "Customer", "a fresh tab, named after it");
+        assert_eq!(a.doc.elements.len(), 1, "just the one resource — not the group it came from");
+        assert_eq!(a.doc.metadata.view, View::Ontology);
+
+        key(&mut a, KeyCode::Char('e'));
+        assert!(a.expandpick.is_some(), "Customer's link to Order is a real, unexpanded connection");
+        key(&mut a, KeyCode::Enter);
+        assert!(a.expandpick.is_none(), "adding one closes the list");
+        assert_eq!(a.doc.elements.len(), 2, "Order is now on the diagram too");
+        assert!(a.doc.elements.iter().any(|e| e.display() == "Order"));
+        assert!(a.doc.relations.iter().any(|r| r.kind == RelationKind::LinkType));
+
+        // Order's own edge back to Customer is already on the diagram, so there is nothing
+        // left for either to expand.
+        let order_id = a.doc.elements.iter().find(|e| e.display() == "Order").unwrap().id;
+        a.cursor = Some(order_id);
+        key(&mut a, KeyCode::Char('e'));
+        assert!(a.expandpick.is_none(), "nothing left to expand — the key is refused, not opened empty");
+    }
+
+    #[test]
+    fn the_tree_nests_an_object_type_s_own_actions_and_links_under_it_and_picking_a_link_places_both_ends() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("vim-shapes-ontology-nest-{}.json", std::process::id()));
+        std::fs::write(&path, foundry_fixture_json("")).unwrap();
+        let mut a = app();
+        a.run_excmd(format!("import {}", path.display()));
+        std::fs::remove_file(&path).ok();
+
+        key(&mut a, KeyCode::Right); // open CRM
+        let rows = tree::rows(&a.model_tree, "");
+        let customer_i = rows.iter().position(|r| r.label == "Customer").unwrap();
+        assert!(matches!(&rows[customer_i].kind, tree::RowKind::Resource { expandable: true, .. }), "Customer has its own link to expand");
+        a.tree.as_mut().unwrap().sel = customer_i;
+        key(&mut a, KeyCode::Right); // reveal Customer's own children, without picking it
+        assert!(a.tree.is_some(), "→ only expands — it never picks");
+        assert_eq!(a.doc.elements.len(), 0);
+
+        let opened = tree::rows(&a.model_tree, "");
+        let link_row = opened.iter().find(|r| r.label == "→ Order").expect("Customer's link to Order, nested under it");
+        assert!(matches!(&link_row.kind, tree::RowKind::Link { .. }));
+        a.tree.as_mut().unwrap().sel = opened.iter().position(|r| r.label == "→ Order").unwrap();
+        key(&mut a, KeyCode::Enter);
+
+        assert!(a.tree.is_none(), "picking the link closes the tree");
+        assert_eq!(a.tab_name(), "Customer", "started from the link's own object type");
+        assert_eq!(a.doc.elements.len(), 2, "both ends, in one move");
+        assert!(a.doc.elements.iter().any(|e| e.display() == "Order"));
+        assert!(a.doc.relations.iter().any(|r| r.kind == RelationKind::LinkType), "and the edge between them");
+    }
+
+    #[test]
+    fn a_link_with_a_long_description_is_placed_below_not_beside() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("vim-shapes-ontology-vertical-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{
+                "version": 2,
+                "typeGroups": [{"rid": "g.assets", "displayMetadata": {"displayName": "Assets"}}],
+                "objectTypes": [
+                    {"id": "ot.asset", "apiName": "Asset", "displayMetadata": {"displayName": "Asset"},
+                     "status": {"type": "active"}, "typeGroups": ["g.assets"], "interfaces": [],
+                     "primaryKeys": [], "titlePropertyId": null, "properties": [], "datasources": []},
+                    {"id": "ot.location", "apiName": "AssetLocation", "displayMetadata": {"displayName": "Asset Location"},
+                     "status": {"type": "active"}, "typeGroups": ["g.assets"], "interfaces": [],
+                     "primaryKeys": [], "titlePropertyId": null, "properties": [], "datasources": []}
+                ],
+                "interfaces": [], "actionTypes": [], "sharedProperties": [],
+                "relations": [{"description": "Connects an operational location to the physical assets currently placed there.",
+                    "definition": {"type": "oneToMany", "oneToMany": {
+                    "objectTypeIdOneSide": "ot.location", "objectTypeIdManySide": "ot.asset",
+                    "oneToManyLinkMetadata": {"apiName": "locatedAssets"}, "manyToOneLinkMetadata": {"apiName": "currentLocation"}
+                }}}]
+            }"#,
+        )
+        .unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("import {}", path.display()));
+        std::fs::remove_file(&path).ok();
+
+        key(&mut a, KeyCode::Right); // open Assets
+        let rows = tree::rows(&a.model_tree, "");
+        let i = rows.iter().position(|r| r.label == "Asset").unwrap();
+        a.tree.as_mut().unwrap().sel = i;
+        key(&mut a, KeyCode::Enter); // pick Asset alone
+
+        let asset = a.cursor.unwrap();
+        let (ax, ay) = (a.doc.element(asset).unwrap().x, a.doc.element(asset).unwrap().y);
+        key(&mut a, KeyCode::Char('e'));
+        key(&mut a, KeyCode::Enter); // the one connection: its long-described link to Asset Location
+
+        let location = a.doc.elements.iter().find(|e| e.display() == "Asset Location").unwrap();
+        assert_eq!(location.x, ax, "straight below, not off to the side, so the description has room");
+        assert!(location.y > ay, "and under it, not on top of it");
+    }
+
+    #[test]
+    fn e_on_a_foreign_key_row_in_props_expands_its_link_and_focuses_the_far_end() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("vim-shapes-ontology-fk-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{
+                "version": 2,
+                "typeGroups": [{"rid": "g.crm", "displayMetadata": {"displayName": "CRM"}}],
+                "objectTypes": [
+                    {"id": "ot.customer", "apiName": "Customer", "displayMetadata": {"displayName": "Customer"},
+                     "status": {"type": "active"}, "typeGroups": ["g.crm"], "interfaces": [],
+                     "primaryKeys": [], "titlePropertyId": null, "properties": [], "datasources": []},
+                    {"id": "ot.order", "apiName": "Order", "displayMetadata": {"displayName": "Order"},
+                     "status": {"type": "active"}, "typeGroups": ["g.crm"], "interfaces": [],
+                     "primaryKeys": ["p.oid"], "titlePropertyId": null,
+                     "properties": [
+                        {"id": "p.oid", "apiName": "id", "displayMetadata": {"displayName": "Id", "visibility": "NORMAL"}, "status": {"type": "active"}, "baseType": {"type": "STRING"}},
+                        {"id": "p.custfk", "apiName": "customerId", "displayMetadata": {"displayName": "Customer Id", "visibility": "NORMAL"}, "status": {"type": "active"}, "baseType": {"type": "STRING"}}
+                     ],
+                     "datasources": []}
+                ],
+                "interfaces": [], "actionTypes": [], "sharedProperties": [],
+                "relations": [{"description": null, "definition": {"type": "oneToMany", "oneToMany": {
+                    "objectTypeIdOneSide": "ot.customer", "objectTypeIdManySide": "ot.order",
+                    "oneToManyLinkMetadata": {"apiName": "orders"}, "manyToOneLinkMetadata": {"apiName": "customer"},
+                    "manySideForeignKeyPropertyId": "p.custfk"
+                }}}]
+            }"#,
+        )
+        .unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("import {}", path.display()));
+        std::fs::remove_file(&path).ok();
+
+        key(&mut a, KeyCode::Right); // open CRM
+        let rows = tree::rows(&a.model_tree, "");
+        let i = rows.iter().position(|r| r.label == "Order").unwrap();
+        a.tree.as_mut().unwrap().sel = i;
+        key(&mut a, KeyCode::Enter); // Order, alone
+        assert_eq!(a.doc.elements.len(), 1);
+
+        press(&mut a, "P");
+        assert!(a.props.is_some());
+        // id, then customerId — the foreign key.
+        key(&mut a, KeyCode::Char('j'));
+        assert!(a.props_fk_edge().is_some(), "customerId backs the link to Customer");
+
+        key(&mut a, KeyCode::Char('e'));
+        assert!(a.props.is_none(), "expanding closes the property browser");
+        assert_eq!(a.doc.elements.len(), 2, "Customer is now on the diagram too");
+        let customer = a.doc.elements.iter().find(|e| e.display() == "Customer").unwrap();
+        assert_eq!(a.cursor, Some(customer.id), "focused on the element it just expanded to");
+        assert!(a.doc.relations.iter().any(|r| r.kind == RelationKind::LinkType));
+    }
+
+    #[test]
+    fn e_on_an_ordinary_property_row_in_props_says_so_and_changes_nothing() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("vim-shapes-ontology-fk-plain-{}.json", std::process::id()));
+        std::fs::write(&path, foundry_fixture_json("")).unwrap();
+        let mut a = app();
+        a.run_excmd(format!("import {}", path.display()));
+        std::fs::remove_file(&path).ok();
+
+        key(&mut a, KeyCode::Right);
+        let rows = tree::rows(&a.model_tree, "");
+        let i = rows.iter().position(|r| r.label == "Customer").unwrap();
+        a.tree.as_mut().unwrap().sel = i;
+        key(&mut a, KeyCode::Enter);
+
+        press(&mut a, "P");
+        assert!(a.props.is_some());
+        key(&mut a, KeyCode::Char('e'));
+        assert!(a.props.is_some(), "not a foreign key — the panel stays open");
+        assert_eq!(a.doc.elements.len(), 1, "nothing was added");
+    }
+
+    #[test]
+    fn import_with_no_path_opens_a_browser_that_walks_and_imports_a_file() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("vim-shapes-importdlg-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.json"), foundry_fixture_json("")).unwrap();
+
+        let mut a = app();
+        a.run_excmd("import".into());
+        assert!(a.importdlg.is_some(), "no path opens the browser instead of an error");
+        a.importdlg.as_mut().unwrap().dir = dir.clone();
+        a.importdlg.as_mut().unwrap().read_dir();
+        key(&mut a, KeyCode::Down); // "sub"
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.importdlg.as_ref().unwrap().dir, dir.join("sub"), "enter walks into a folder");
+        key(&mut a, KeyCode::Char('h'));
+        assert_eq!(a.importdlg.as_ref().unwrap().dir, dir, "h comes back up");
+        key(&mut a, KeyCode::Down);
+        key(&mut a, KeyCode::Down);
+        key(&mut a, KeyCode::Enter);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(a.importdlg.is_none(), "picking a file closes the dialog");
+        assert!(a.ontology.is_some());
+        assert_eq!(a.doc.elements.len(), 0, "empty until a resource is picked from :tree, same as :import <path>");
+    }
+
+    #[test]
+    fn ctrl_enter_in_the_import_browser_imports_the_folder_it_is_standing_in() {
+        let mut root = std::env::temp_dir();
+        root.push(format!("vim-shapes-importdlg-folder-{}", std::process::id()));
+        let model = root.join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("folder.xml"), r#"<archimate:ArchimateModel xmlns:archimate="http://www.archimatetool.com/archimate" name="Fixture" id="m1"/>"#).unwrap();
+        std::fs::write(model.join("ApplicationComponent_a1.xml"), r#"<archimate:ApplicationComponent xmlns:archimate="http://www.archimatetool.com/archimate" name="CRM" id="a1"/>"#).unwrap();
+
+        let mut a = app();
+        a.run_excmd("import".into());
+        a.importdlg.as_mut().unwrap().dir = model.clone();
+        a.importdlg.as_mut().unwrap().read_dir();
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(a.importdlg.is_none(), "^enter imports the folder itself and closes the dialog");
+        assert_eq!(a.doc.elements[0].label, "CRM");
+    }
+
+    #[test]
+    fn import_asks_first_when_there_is_unsaved_work() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("vim-shapes-importdlg-dirty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.json"), r#"{"version": 2, "tabs": [{"name": "x", "diagram": {"version": 2}}]}"#).unwrap();
+
+        let mut a = app();
+        a.doc.add(Box, "dirty", 0.0, 0.0);
+        a.run_excmd("import".into());
+        a.importdlg.as_mut().unwrap().dir = dir.clone();
+        a.importdlg.as_mut().unwrap().read_dir();
+        key(&mut a, KeyCode::Down); // "a.json" — ".." is first
+        key(&mut a, KeyCode::Enter);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(matches!(a.confirm, Some(Confirm::Discard(Pending::Import(_)))), "unsaved work is asked about first, same as :import <path>");
+    }
+
+    #[test]
+    fn esc_cancels_the_import_browser_with_nothing_changed() {
+        let mut a = app();
+        a.run_excmd("import".into());
+        assert!(a.importdlg.is_some());
+        key(&mut a, KeyCode::Esc);
+        assert!(a.importdlg.is_none());
     }
 
     #[test]
@@ -5186,6 +6122,50 @@ mod tests {
     }
 
     #[test]
+    fn export_diagram_round_trips_through_tabnew_into_a_new_tab_not_a_replaced_workspace() {
+        let mut a = app();
+        let (x, y) = two(&mut a);
+        a.doc.connect(RelationKind::Realization, x, y).unwrap();
+        let mut path = std::env::temp_dir();
+        let stem = format!("vim-shapes-diagram-{}", std::process::id());
+        path.push(format!("{stem}.diagram"));
+        a.run_excmd(format!("export {}", path.display()));
+        assert!(matches!(a.status, Some((ref m, Tone::Good)) if m.contains("2 elements")), "{:?}", a.status);
+
+        // A second, unrelated tab is already open — :tabnew must not disturb it.
+        a.run_excmd("tabnew freeform untouched".into());
+        let before = a.tabs.len();
+        a.run_excmd(format!("tabnew {}", path.display()));
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(a.tabs.len(), before + 1, "added, not replaced");
+        // A bare diagram export carries no tab name of its own — a tab's name is workspace
+        // structure, not part of the document — so the new tab is named after the file, the
+        // same fallback `:open`ing one already uses.
+        assert_eq!(a.tab_name(), stem);
+        assert_eq!(a.doc.elements.len(), 2);
+        assert!(a.doc.relations.iter().any(|r| r.kind == RelationKind::Realization));
+        press(&mut a, "gT");
+        assert_eq!(a.tab_name(), "untouched", "the tab open before :tabnew is still exactly as it was");
+    }
+
+    #[test]
+    fn tabnew_on_a_multi_tab_file_is_refused_with_a_clear_reason_and_nothing_added() {
+        let mut a = app();
+        two(&mut a);
+        a.run_excmd("tabnew freeform second".into());
+        let mut path = std::env::temp_dir();
+        path.push(format!("vim-shapes-workspace-{}.json", std::process::id()));
+        a.run_excmd(format!("write {}", path.display()));
+        let before = a.tabs.len();
+
+        a.run_excmd(format!("tabnew {}", path.display()));
+        std::fs::remove_file(&path).ok();
+        assert_eq!(a.tabs.len(), before, "refused, not partially applied");
+        assert!(matches!(a.status, Some((ref m, Tone::Bad)) if m.contains("2 tabs")), "{:?}", a.status);
+    }
+
+    #[test]
     fn a_freeform_tab_offers_only_plain_shapes_and_refuses_nothing() {
         let mut a = app();
         a.run_excmd("tabnew freeform sketch".into());
@@ -5789,6 +6769,33 @@ mod tests {
         click(&mut a, MouseButton::Right, (10.0, 4.0));
         assert!(a.relpick.is_none());
         assert!(!a.visual && a.selection.is_empty(), "a right-click with no drag cancels the pick");
+    }
+
+    #[test]
+    fn a_right_drag_from_empty_ground_pans_by_exactly_the_mouse_s_own_movement() {
+        let mut a = app();
+        let before = a.camera;
+        mouse(&mut a, MouseEventKind::Down(MouseButton::Right), (60.0, 18.0));
+        mouse(&mut a, MouseEventKind::Drag(MouseButton::Right), (40.0, 12.0));
+        // Content follows the hand: dragging left and up reveals what was off to the left
+        // and above, so the camera itself moves the opposite way of the mouse.
+        assert_eq!(a.camera, (before.0 + 20.0, before.1 + 6.0));
+        mouse(&mut a, MouseEventKind::Drag(MouseButton::Right), (20.0, 8.0));
+        // A second drag event is incremental from where the last one left off, not from the
+        // original down — a fast, uneven stream of drag events still tracks the mouse exactly.
+        assert_eq!(a.camera, (before.0 + 40.0, before.1 + 10.0));
+        mouse(&mut a, MouseEventKind::Up(MouseButton::Right), (20.0, 8.0));
+        assert_eq!(a.camera, (before.0 + 40.0, before.1 + 10.0), "released where it was — no snap-back");
+    }
+
+    #[test]
+    fn panning_by_right_drag_leaves_the_current_pick_and_hold_untouched() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        a.selection = vec![x];
+        a.visual = true;
+        drag(&mut a, MouseButton::Right, (60.0, 18.0), (40.0, 12.0));
+        assert!(a.visual && a.selection == vec![x], "a pan is a deliberate view move, not a cancel");
     }
 
     #[test]

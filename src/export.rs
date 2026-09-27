@@ -28,6 +28,10 @@ pub enum Format {
     Pdf,
     Xml,
     Html,
+    /// This tab, whole — every element and relation, exactly as `:w` would save it, but on
+    /// its own rather than wrapped in the workspace it came from. What `:tabnew <path>` reads
+    /// back as a new tab, on this document or another.
+    Diagram,
     /// An ontology diagram as a Markdown reference — a wiki page generated from the picture.
     Markdown,
     /// An ontology diagram as a plain definition, in the SDK's casing.
@@ -35,7 +39,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 7] = [Format::Png, Format::Svg, Format::Pdf, Format::Xml, Format::Html, Format::Markdown, Format::Definition];
+    pub const ALL: [Format; 8] = [Format::Png, Format::Svg, Format::Pdf, Format::Xml, Format::Html, Format::Diagram, Format::Markdown, Format::Definition];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -44,6 +48,7 @@ impl Format {
             Format::Pdf => "pdf",
             Format::Xml => "xml",
             Format::Html => "html",
+            Format::Diagram => "diagram",
             Format::Markdown => "md",
             Format::Definition => "json",
         }
@@ -56,6 +61,7 @@ impl Format {
             Format::Pdf => "vector, one page",
             Format::Xml => "a draw.io file, to edit on",
             Format::Html => "a web page with the vector picture in it",
+            Format::Diagram => "this tab alone, lossless — :tabnew <path> reads it back as a new tab",
             Format::Markdown => "an ontology's reference as a wiki page: object types, properties, links, actions",
             Format::Definition => "an ontology's definition as JSON, in the SDK's casing",
         }
@@ -568,6 +574,11 @@ pub fn write(doc: &Document, title: &str, o: &Options, path: &Path) -> Result<St
             crate::drawio_export::export(doc, path).map_err(|e| format!("{}: {e}", path.display()))?;
             Ok(format!("{} elements, {} relations → {}", doc.elements.len(), doc.relations.len(), path.display()))
         }
+        Format::Diagram => {
+            let text = serde_json::to_string_pretty(doc).expect("a document always serializes");
+            std::fs::write(path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok(format!("{} elements, {} relations → {}", doc.elements.len(), doc.relations.len(), path.display()))
+        }
         Format::Markdown => {
             std::fs::write(path, crate::ontology::doc::markdown(doc)).map_err(|e| format!("{}: {e}", path.display()))?;
             Ok(format!("{} types documented → {}", doc.elements.iter().filter(|e| e.kind.layer() == Layer::Ontology).count(), path.display()))
@@ -728,5 +739,18 @@ mod tests {
             assert!(std::fs::metadata(&path).unwrap().len() > 100);
             std::fs::remove_file(&path).ok();
         }
+    }
+
+    #[test]
+    fn diagram_format_writes_a_bare_document_that_reads_back_identical() {
+        let d = doc();
+        let mut path = std::env::temp_dir();
+        path.push(format!("vim-shapes-export-{}.diagram", std::process::id()));
+        let o = Options { format: Format::Diagram, ..Options::default() };
+        write(&d, "t", &o, &path).expect("write");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        let read_back: Document = serde_json::from_str(&text).expect("the same shape a bare diagram file already opens as");
+        assert_eq!(read_back, d, "lossless — every field, not just the picture");
     }
 }

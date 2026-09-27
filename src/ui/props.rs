@@ -64,7 +64,7 @@ impl Widget for Browser<'_> {
             Some((Typing::Type, _)) => " a base type: string, integer, date… — enter, or esc",
             Some((Typing::ValueType, _)) => " the value type it adopts, blank for none — enter, or esc",
             Some((Typing::ApiName, _)) => " the API name, blank for none — enter, or esc",
-            None => " j/k  n new  r rename  t type  T by name  p key  l title  s shared  [ array  * required  v value type  a api  J/K move  d delete  esc",
+            None => " j/k  n new  r rename  t type  T by name  p key  l title  s shared  [ array  * required  v value type  a api  J/K move  d delete  e expand  esc",
         };
         let body = chrome::hint(buf, inner, hint);
         let dim = Style::new().fg(theme::t().dim);

@@ -56,7 +56,7 @@ fn slugs_are_unique_and_resolve_back_to_their_kind() {
 
 #[test]
 fn every_kind_lists_itself_exactly_once() {
-    assert_eq!(ShapeKind::ALL.len(), 83);
+    assert_eq!(ShapeKind::ALL.len(), 108);
     for (i, k) in ShapeKind::ALL.iter().enumerate() {
         assert!(!ShapeKind::ALL[i + 1..].contains(k), "{} appears twice", k.name());
     }
@@ -297,6 +297,45 @@ fn the_ontology_view_has_its_own_grammar_in_foundry_s_words() {
     ok(Aggregation, Grouping, ObjectType);
     no(Flow, ApplicationComponent, ObjectType);
     ok(Association, Node, ObjectType);
+}
+
+#[test]
+fn the_alignment_layers_ground_object_types_in_the_common_core() {
+    let ok = |r, a, b| assert_eq!(allowed(r, a, b), Ok(()), "{a:?} {} {b:?} should be allowed", RelationKind::verb(r));
+    let no = |r, a, b| assert!(allowed(r, a, b).is_err(), "{a:?} {} {b:?} should be refused", RelationKind::verb(r));
+    // The upper ontology's own hierarchy: each class has one real parent.
+    ok(SubsumedBy, BfoMaterialEntity, BfoIndependentContinuant);
+    no(SubsumedBy, BfoMaterialEntity, BfoContinuant);
+    ok(SubsumedBy, BfoRole, BfoRealizableEntity);
+    no(SubsumedBy, BfoRole, BfoDisposition);
+    ok(SubsumedBy, BfoFunction, BfoDisposition);
+    // The common core's own hierarchy, and its grounding in BFO.
+    ok(SubsumedBy, CcoPerson, CcoAgent);
+    no(SubsumedBy, CcoPerson, BfoMaterialEntity);
+    ok(SubsumedBy, CcoAgent, BfoMaterialEntity);
+    ok(SubsumedBy, CcoGeospatialRegion, BfoImmaterialEntity);
+    no(SubsumedBy, CcoGeospatialRegion, BfoMaterialEntity);
+    ok(SubsumedBy, CcoFacility, CcoArtifact);
+    // The seam: an object type or interface reaches the common core, never the upper ontology
+    // straight, and nothing else in the ontology layer reaches either.
+    ok(SubsumedBy, ObjectType, CcoPerson);
+    ok(SubsumedBy, Interface, CcoAgent);
+    assert!(allowed(SubsumedBy, ObjectType, BfoMaterialEntity).unwrap_err().contains("common core"), "no straight line to the top");
+    no(SubsumedBy, Datasource, CcoPerson);
+    no(SubsumedBy, BusinessObject, CcoPerson);
+    no(SubsumedBy, ApplicationComponent, BfoMaterialEntity);
+    // Nothing but subsumed-by, association and link mean anything up here.
+    no(Realization, ObjectType, CcoPerson);
+    no(Access, ApplicationComponent, CcoPerson);
+    ok(Association, ObjectType, CcoPerson);
+    ok(Link, CcoPerson, BfoMaterialEntity);
+    // The flagship case: two object types from different sources, interoperable because both
+    // ground in the same common-core class.
+    ok(SubsumedBy, ObjectType, CcoPerson);
+    assert_eq!(RelationKind::parse("subsumed-by"), Some(SubsumedBy));
+    assert_eq!(View::parse("align"), Some(View::Alignment));
+    assert_eq!(View::Alignment.badge(), "architecture · alignment");
+    assert_eq!(SubsumedBy.notation().head, End::Triangle);
 }
 
 #[test]

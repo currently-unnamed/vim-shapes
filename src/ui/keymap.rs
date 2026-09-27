@@ -173,6 +173,10 @@ pub struct Where {
     pub plain_keys: bool,
     /// The cursor's element is inside a grouping — there is a parent to go up to.
     pub in_group: bool,
+    /// The cursor's element came from the resident ontology index and has at least one real
+    /// connection in it that is not on this diagram yet — `e` (expand) is the only thing
+    /// that reads this.
+    pub can_expand: bool,
 }
 
 impl Where {
@@ -605,6 +609,16 @@ pub static COMMANDS: &[Cmd] = &[
             _ => need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         },
         run: &[Stroke::k('o')],
+    },
+    Cmd {
+        keys: "e",
+        short: "expand",
+        what: |_| "expand: list what this element really connects to in the ontology it came from — one, or all of them",
+        section: Section::Relate,
+        on: &[Stroke::k('e')],
+        prefix: None,
+        avail: |w| need(w.normal() && w.on_body() && w.can_expand, "not an ontology element with anything left to expand"),
+        run: &[Stroke::k('e')],
     },
     Cmd {
         keys: "r",
@@ -1083,6 +1097,7 @@ pub(crate) fn sample_wheres() -> Vec<Where> {
         moving_end: false,
         plain_keys: false,
         in_group: false,
+        can_expand: false,
     };
     let body = Spot { focus: Focus::Body, composite: false, relations: 0, refused: false };
     let rel = Spot { focus: Focus::Relation, composite: false, relations: 2, refused: false };

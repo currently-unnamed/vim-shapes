@@ -218,6 +218,67 @@ pub static IDIOMS: &[Idiom] = &[
             (Triggering, "work", "golive"),
         ],
     },
+    Idiom {
+        name: "bfo-backbone",
+        tagline: "the top of BFO: continuant against occurrent, and what a continuant divides into",
+        story: "The real shape of the standard, not a diagram's worth of it. Everything that \
+                persists — a continuant — is either independent of anything else, dependent on \
+                one specific bearer, or dependent on some bearer or other; a material entity is \
+                the independent, has-mass case. Nothing here is ever drawn on its own diagram; \
+                every other box in the architecture is, eventually, subsumed by one of these.",
+        elements: &[
+            ("continuant", BfoContinuant, "Continuant"),
+            ("independent", BfoIndependentContinuant, "Independent Continuant"),
+            ("specific", BfoSpecificallyDependentContinuant, "Specifically Dependent Continuant"),
+            ("generic", BfoGenericallyDependentContinuant, "Generically Dependent Continuant"),
+            ("material", BfoMaterialEntity, "Material Entity"),
+        ],
+        relations: &[
+            (SubsumedBy, "independent", "continuant"),
+            (SubsumedBy, "specific", "continuant"),
+            (SubsumedBy, "generic", "continuant"),
+            (SubsumedBy, "material", "independent"),
+        ],
+    },
+    Idiom {
+        name: "grounded-class",
+        tagline: "a common-core class's full chain down to BFO",
+        story: "A Person is not a primitive: it is a kind of Agent, which is a kind of Material \
+                Entity, which is a kind of Independent Continuant. Follow the chain far enough \
+                and it always ends in BFO — which is what makes 'grounded' more than a figure \
+                of speech.",
+        elements: &[
+            ("person", CcoPerson, "Person"),
+            ("agent", CcoAgent, "Agent"),
+            ("material", BfoMaterialEntity, "Material Entity"),
+            ("independent", BfoIndependentContinuant, "Independent Continuant"),
+        ],
+        relations: &[
+            (SubsumedBy, "person", "agent"),
+            (SubsumedBy, "agent", "material"),
+            (SubsumedBy, "material", "independent"),
+        ],
+    },
+    Idiom {
+        name: "cross-domain-alignment",
+        tagline: "two object types from different sources, interoperable because both ground in one class",
+        story: "Merging data sources into Foundry from different application ontologies is the \
+                everyday case this answers. 'Customer', from a CRM source, and 'Client', from a \
+                billing source, share no relation of their own — neither realizes a business \
+                object of the other's, and forcing one would be a lie. What makes them \
+                interoperable is that both are SUBSUMED BY the same common-core class: a query \
+                that joins Customer and Client through Person is now a claim the model itself \
+                licenses, not a coincidence of two people naming things alike.",
+        elements: &[
+            ("customer", ObjectType, "Customer (CRM source)"),
+            ("client", ObjectType, "Client (billing source)"),
+            ("person", CcoPerson, "Person"),
+        ],
+        relations: &[
+            (SubsumedBy, "customer", "person"),
+            (SubsumedBy, "client", "person"),
+        ],
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static Idiom> {

@@ -91,13 +91,13 @@ Each tab is a diagram of its own, with its own cursor, view and undo; the file h
 - **freeform** — plain shapes, like a whiteboard. No ontology, nothing refused. The standard general-purpose diagram.
 - **architecture** — the enterprise ontology below, with `:kind` to narrow it to one view.
 
-`^t` makes a new tab: it asks which kind, then opens the command line ready for the name (`Enter` names it, `Esc` keeps "diagram N"). `:tabnew freeform notes` does the same in one line. `gt` / `gT` move between tabs, `:tab N` jumps, `:tabs` lists, `:tabrename <name>` renames, `:tabclose` closes (asking if the diagram is unsaved).
+`^t` makes a new tab: it asks which kind, then opens the command line ready for the name (`Enter` names it, `Esc` keeps "diagram N"). `:tabnew freeform notes` does the same in one line. `gt` / `gT` move between tabs, `:tab N` jumps, `:tabs` lists, `:tabrename <name>` renames, `:tabclose` closes (asking if the diagram is unsaved). `:tabnew <path>` takes a file instead of a kind — a tab exported with `:export <file.diagram>` — and adds it as a new tab without touching any tab already open; a file holding more than one tab is refused rather than partly applied (`:open` it instead).
 
 ---
 
 ## Rendering
 
-`V` previews the current tab: a PNG in a scratch file, opened with whatever opens pictures on your machine, no questions asked. It is the *clean* picture, the way a desktop diagram tool draws one: white paper, a ruled grid, solid outlines, filled arrowheads, sans-serif labels. `:export` opens the export dialog — PNG, SVG, PDF, XML (draw.io) and HTML, in either the clean style or the terminal's own braille style, with zoom, size, a transparent or light ground, border and grid — and `:export file.svg` writes the format the extension names at the defaults. `:render out.png` writes the current tab as a picture. It is not a redrawing: the cells, exactly as the terminal shows them, braille and all, are rasterised through a real monospace font, so what is on screen and what is in the file are one rendering. Most monospace fonts have no braille, so a small stack of fonts is tried per glyph, the way a terminal falls back. `\` presents the diagram alone on screen, framed the way the rendering is.
+`V` previews the current tab: a PNG in a scratch file, opened with whatever opens pictures on your machine, no questions asked. It is the *clean* picture, the way a desktop diagram tool draws one: white paper, a ruled grid, solid outlines, filled arrowheads, sans-serif labels. `:export` opens the export dialog — PNG, SVG, PDF, XML (draw.io), HTML and diagram, in either the clean style or the terminal's own braille style, with zoom, size, a transparent or light ground, border and grid — and `:export file.svg` writes the format the extension names at the defaults. The diagram format is not a picture: it is this tab alone, losslessly, and `:tabnew <path>` reads it back as a new tab, on this session or another. `:render out.png` writes the current tab as a picture. It is not a redrawing: the cells, exactly as the terminal shows them, braille and all, are rasterised through a real monospace font, so what is on screen and what is in the file are one rendering. Most monospace fonts have no braille, so a small stack of fonts is tried per glyph, the way a terminal falls back. `\` presents the diagram alone on screen, framed the way the rendering is.
 
 ---
 
@@ -164,6 +164,10 @@ An object type is its properties, so it is drawn as a box with a header and a co
 
 Two exports pay for the view: `:export ontology.md` writes the diagram as a reference page — object types with property tables, link types with cardinality, interfaces with implementers, actions with parameters and rules — and `:export ontology.json` writes a plain definition in the SDK's casing (`apiName`, `primaryKey`, `baseType`). Draw.io gets real UML class cells. `:lint` and `--check` add the schema's own checks: no primary key, two of them, a title that is not a string, an unnamed link type, an interface nothing implements, an action with no rule.
 
+## Grounding the ontology: the common core and BFO
+
+Merging data sources into Foundry from different application ontologies is the everyday case two more layers answer. **Common core** holds the Common Core Ontologies' mid-level classes (Agent, Person, Organization, Artifact, Act, Event, Information Content Entity, Geospatial Region, Facility); **upper ontology** holds the Basic Formal Ontology's top-level backbone (Continuant, Occurrent, and what each divides into), used unchanged from BFO 2020. `:kind alignment` narrows the palette to both, with the ontology layer they ground. The one relation, **subsumed-by** ("is a kind of"), joins a class to its one real parent — inside the common core, inside the upper ontology, or from the common core down into BFO — and, at the one seam, an object type or interface to the common-core class it is classified under. An object type is never subsumed straight into the upper ontology: the common core is the seam, the way a business process never touches a component straight, only through a service. Two object types from different sources — "Customer" from a CRM source, "Client" from a billing source — that both subsume to the same common-core class are what makes them interoperable: a query joining them is now a claim the model licenses, not a coincidence of naming. `:idiom cross-domain-alignment` stamps the worked example.
+
 ## Layers
 
 Every shape and relation sits on a layer, and the layers are a stack. Most tools hide that behind "to front" and "to back"; here `:layers` opens a browser like a picture editor's: the stack top first, each layer shown or hidden (`space`), locked or not (`l`), with what sits on it counted, the current one (where new things go, `Enter`) marked. `n` makes a new layer, `r` renames, `J`/`K` reorder, `d` deletes (its things drop to the layer beneath), and `m` moves the cursor's shape or relation, or the picked set, onto the selected layer. A hidden layer cannot be stood on; a locked one refuses every change with the reason. Within a layer, the sheet's Arrange tab has to front, to back, bring forward, send backward, the layer itself, a per-item lock, and snap to grid. None of it is written to the file until a second layer exists.
@@ -191,8 +195,9 @@ A grouping is a box drawn round other shapes, and membership is *where things si
 | `:n` | start an empty diagram |
 | `:q` / `:q!` | quit / quit without asking |
 | `ZZ` / `ZQ` | `:wq` and `:q!`, as vim chords |
-| `:export` | the export dialog: png, svg, pdf, xml (draw.io), html — format, file, zoom, size, transparent, dark/light, border, grid |
+| `:export` | the export dialog: png, svg, pdf, xml (draw.io), html, diagram — format, file, zoom, size, transparent, dark/light, border, grid |
 | `:export <file.svg>` | the format the extension names, at the defaults |
+| `:export <file.diagram>` | this tab alone, losslessly — `:tabnew <path>` reads it back as a new tab |
 | `V` | preview: the tab as a PNG, opened at once |
 | `:title <name>` | name the diagram |
 | `:ink` | `lines` (box drawing, the default) or `braille` — how the diagram is drawn; kept in the config file |

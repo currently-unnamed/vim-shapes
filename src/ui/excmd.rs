@@ -40,6 +40,7 @@ pub enum Op {
     Tree,
     Props,
     Diagram,
+    Workbench,
 }
 
 /// What shape a command's argument takes — enough for Tab to complete helpfully.
@@ -53,6 +54,9 @@ pub enum Arg {
     View,
     /// One of a small fixed set of words.
     Verb(&'static [&'static str]),
+    /// One of a small fixed set of words, or a path — `:tabnew`'s own kind, since it takes
+    /// either a kind word for an empty tab or a file to open into one.
+    VerbOrPath(&'static [&'static str]),
     Idiom,
     /// A manual topic.
     Topic,
@@ -73,7 +77,7 @@ pub static COMMANDS: &[ExCmd] = &[
     ExCmd { name: "write", aliases: &["w"], op: Op::Write, arg: Arg::Path, what: "save — to the file opened, or to the path given" },
     ExCmd { name: "wq", aliases: &["x"], op: Op::Wq, arg: Arg::Path, what: "save and quit" },
     ExCmd { name: "open", aliases: &["o", "e", "edit"], op: Op::Open, arg: Arg::Path, what: "open a diagram file" },
-    ExCmd { name: "import", aliases: &[], op: Op::Import, arg: Arg::Path, what: "import a draw.io file, an ArchiMate exchange file, or a coArchi model folder — best-effort, never refused for an unrecognized shape" },
+    ExCmd { name: "import", aliases: &[], op: Op::Import, arg: Arg::Path, what: "import a draw.io file, an ArchiMate exchange file, a coArchi model folder, or a Foundry ontology export — best-effort, never refused for an unrecognized shape; empty, opens a browser" },
     ExCmd { name: "new", aliases: &["n"], op: Op::New, arg: Arg::None, what: "start an empty diagram" },
     ExCmd { name: "quit", aliases: &["q"], op: Op::Quit, arg: Arg::None, what: "quit — asks if there is unsaved work; :q! does not" },
     ExCmd { name: "add", aliases: &["a"], op: Op::Add, arg: Arg::Kind, what: "add an element — bare opens the palette, :add <kind> skips it" },
@@ -84,7 +88,7 @@ pub static COMMANDS: &[ExCmd] = &[
     ExCmd { name: "title", aliases: &["t"], op: Op::Title, arg: Arg::Text, what: "name the diagram" },
     ExCmd { name: "export", aliases: &["E"], op: Op::Export, arg: Arg::Path, what: "export — bare opens the dialog (png, svg, pdf, xml, html); :export <file.ext> writes it outright" },
     ExCmd { name: "help", aliases: &["h"], op: Op::Help, arg: Arg::Topic, what: "the manual — :help <topic> jumps to a page" },
-    ExCmd { name: "tabnew", aliases: &["tn"], op: Op::TabNew, arg: Arg::Verb(&["freeform", "architecture"]), what: "a new tab — freeform or architecture, then a name (^t asks)" },
+    ExCmd { name: "tabnew", aliases: &["tn"], op: Op::TabNew, arg: Arg::VerbOrPath(&["freeform", "architecture"]), what: "a new tab — freeform or architecture, then a name (^t asks); or a file — a diagram exported with :export, opened into a new tab" },
     ExCmd { name: "tabrename", aliases: &["tr"], op: Op::TabRename, arg: Arg::Text, what: "rename this tab" },
     ExCmd { name: "tabclose", aliases: &["tc"], op: Op::TabClose, arg: Arg::None, what: "close this tab (asks if it is the only copy of work; :tabclose! does not)" },
     ExCmd { name: "tab", aliases: &[], op: Op::Tab, arg: Arg::Text, what: "go to tab N" },
@@ -100,6 +104,13 @@ pub static COMMANDS: &[ExCmd] = &[
     ExCmd { name: "props", aliases: &["properties", "params"], op: Op::Props, arg: Arg::None, what: "the property browser on the cursor's object type, interface or action type (P): its rows, typed" },
     ExCmd { name: "stack", aliases: &["layers", "ly"], op: Op::Layers, arg: Arg::None, what: "the layer browser (:layers): show, hide, lock, reorder, rename layers; move things between them" },
     ExCmd { name: "tree", aliases: &[], op: Op::Tree, arg: Arg::None, what: "the model tree: a coArchi import's own folders, fold/unfold and search, enter jumps to a view's tab" },
+    ExCmd {
+        name: "workbench",
+        aliases: &["wb"],
+        op: Op::Workbench,
+        arg: Arg::Path,
+        what: "the architecture workbench, docked on the left: a live folder of diagrams — new, rename, move, delete; bare, toggles it or offers the folders opened before",
+    },
 ];
 
 /// The command a typed name means, if any.
@@ -146,6 +157,7 @@ pub fn candidates(buf: &str) -> Vec<String> {
         Arg::Kind => ShapeKind::ALL.iter().map(|k| k.slug().to_string()).filter(|s| s.starts_with(&rest)).collect(),
         Arg::View => View::ALL.iter().map(|v| v.name().to_string()).filter(|s| s.starts_with(&rest)).collect(),
         Arg::Verb(list) => list.iter().map(|s| s.to_string()).filter(|s| s.starts_with(&rest)).collect(),
+        Arg::VerbOrPath(list) => list.iter().map(|s| s.to_string()).filter(|s| s.starts_with(&rest)).chain(paths(&rest)).collect(),
         Arg::Idiom => idiom::IDIOMS.iter().map(|i| i.name.to_string()).filter(|s| s.starts_with(&rest)).collect(),
         Arg::Topic => manual::tags().into_iter().filter(|t| t.to_ascii_lowercase().starts_with(&rest.to_ascii_lowercase())).collect(),
     };
@@ -206,7 +218,11 @@ mod tests {
         assert!(candidates("kind tech").contains(&"kind technology".to_string()));
         assert!(candidates("idiom s").contains(&"idiom service".to_string()));
         assert!(candidates("new ").is_empty());
-        assert_eq!(candidates("tabnew "), vec!["tabnew architecture", "tabnew freeform"]);
+        // The kind words first, then whatever paths() finds in the working directory — :tabnew
+        // takes either, unlike a plain Verb command.
+        let tabnew = candidates("tabnew ");
+        assert_eq!(&tabnew[..2], ["tabnew freeform", "tabnew architecture"]);
+        assert!(tabnew.len() > 2, "the repo's own files and folders, offered as paths too");
         assert_eq!(resolve("tr").map(|c| c.op), Some(Op::TabRename));
     }
 

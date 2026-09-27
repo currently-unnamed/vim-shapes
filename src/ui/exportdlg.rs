@@ -57,7 +57,7 @@ impl Field {
 
     fn unit(self) -> &'static str {
         match self {
-            Field::Format => "png / svg / pdf / xml / html",
+            Field::Format => "png / svg / pdf / xml / html / diagram",
             Field::Style => "terminal (braille) / clean (drawn)",
             Field::File => "path",
             Field::Zoom => "percent",

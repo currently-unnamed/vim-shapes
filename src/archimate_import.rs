@@ -476,6 +476,17 @@ pub enum ModelNode {
     /// `tab_index` is the position `build` gives this view's tab among the *views'* tabs —
     /// stable because every view becomes exactly one tab, in the same order it was found in.
     View { name: String, tab_index: usize },
+    /// A single Foundry ontology resource (`foundry_import::Index::tree`) — an object type or
+    /// an action, named by `id` into the resident `Index` rather than by a tab already built,
+    /// since nothing is built until it is picked. Picking it starts a fresh tab holding just
+    /// this one element. `children` is an object type's own actions and link types — empty,
+    /// and so never shown as foldable, for anything else.
+    Resource { name: String, id: String, children: Vec<ModelNode>, expanded: bool },
+    /// One of an object type's own link types, nested under it: `from`/`to` are the two
+    /// object type ids in the direction the link's own cardinality means. Picking it places
+    /// both ends and the edge between them in one step — the tree's shortcut for what would
+    /// otherwise take picking the object type, then `e`, then this same connection.
+    Link { name: String, from: String, to: String },
 }
 
 /// `dir` may be the model repository's root (coArchi's own layout: `model/folder.xml` under

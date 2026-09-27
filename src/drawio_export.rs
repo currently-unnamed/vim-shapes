@@ -303,6 +303,8 @@ fn layer_fill(l: Layer) -> &'static str {
         Layer::Technology => "#C9E7B7",
         Layer::Implementation => "#FFE0E0",
         Layer::Ontology => "#E2EEFA",
+        Layer::CommonCore => "#D2E8E2",
+        Layer::UpperOntology => "#DFDFDF",
         Layer::Composite => "none",
         Layer::Sketch => "#FFFFFF",
     }

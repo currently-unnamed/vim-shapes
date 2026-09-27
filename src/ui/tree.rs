@@ -1,13 +1,19 @@
-//! The model tree — `:tree` — a fold-and-search browser over a coArchi import's own folder
-//! organization, since a real repository can turn into hundreds of tabs and neither the
-//! header nor `:tabs`/`:tab N` scale to that: the header just runs out of columns with no
-//! sign anything is missing, and `:tab N` wants a number nobody has memorized.
+//! The model tree — `:tree` — a fold-and-search browser over what an import organized: a
+//! coArchi repository's own folders of views, or a Foundry ontology export's type groups,
+//! each holding its object types, and each of those its own actions and link types (Group >
+//! Object Type > Action Type or Link Type — the same hierarchy the export itself has). A real
+//! repository or export can turn into hundreds of rows, and neither the header nor
+//! `:tabs`/`:tab N` scale to that: the header just runs out of columns with no sign anything
+//! is missing, and `:tab N` wants a number nobody has memorized.
 //!
 //! Every letter typed is a query, same as the add palette — the arrows move the selection,
-//! not `j`/`k`, so a folder or a view named after either letter is never unreachable. A
-//! folder toggles open with enter or → ; a view opens it with enter and closes the tree. A
-//! folder with nothing under it — every element inside it but no view — never appears at
-//! all: there is nowhere for it to send you.
+//! not `j`/`k`, so a folder or a leaf named after either letter is never unreachable. `enter`
+//! picks a leaf (a view jumps to its tab; a resource starts a fresh one; a link places both
+//! its ends and the edge between them) or, on a folder, toggles it open. An object type is
+//! both at once — `enter` picks it, `→` (separately) reveals its own actions and link types
+//! — since picking it and browsing what it connects to are different things to want. A
+//! folder with nothing under it — every element inside it but no view or resource — never
+//! appears at all: there is nowhere for it to send you.
 
 use super::{chrome, theme};
 use crate::archimate_import::ModelNode;
@@ -63,18 +69,25 @@ pub struct Row {
     pub kind: RowKind,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum RowKind {
-    /// Never `false` in the sense of "nothing to show" — a folder that leads to no view at
+    /// Never `false` in the sense of "nothing to show" — a folder that leads to no leaf at
     /// all is never turned into a row to begin with, so every one shown here has something
     /// under it.
     Folder { expanded: bool },
     View { tab_index: usize },
+    /// A Foundry ontology resource — an object type or an action. Picking it starts a fresh
+    /// tab, not jump to a built one. `expandable` is only ever true for an object type with
+    /// actions or link types of its own to show.
+    Resource { id: String, expandable: bool, expanded: bool },
+    /// One of an object type's own link types, nested under it. Never foldable.
+    Link { from: String, to: String },
 }
 
-/// The rows a browser shows right now: every folder's own fold state, unless there is a
-/// search, in which case everything that leads to a match is shown regardless of fold state —
-/// folding is for browsing you already know the shape of, not for a search.
+/// The rows a browser shows right now: every folder's (or expandable resource's) own fold
+/// state, unless there is a search, in which case everything that leads to a match is shown
+/// regardless of fold state — folding is for browsing you already know the shape of, not for
+/// a search.
 pub fn rows(nodes: &[ModelNode], filter: &str) -> Vec<Row> {
     let f = filter.trim().to_ascii_lowercase();
     let mut out = Vec::new();
@@ -88,11 +101,11 @@ fn walk(nodes: &[ModelNode], path: &mut Vec<usize>, depth: usize, f: &str, out: 
         path.push(i);
         match node {
             ModelNode::Folder { name, children, expanded } => {
-                // Shown only if there is a view somewhere underneath — a folder of nothing
+                // Shown only if there is a leaf somewhere underneath — a folder of nothing
                 // but elements is not something to browse to, and not a match for anything
                 // typed either — and, while searching, only along a path to a match.
                 let matches = f.is_empty() || name.to_ascii_lowercase().contains(f) || any_match(children, f);
-                if has_view(children) && matches {
+                if has_leaf(children) && matches {
                     let open = *expanded || !f.is_empty();
                     out.push(Row { path: path.clone(), depth, label: name.clone(), kind: RowKind::Folder { expanded: open } });
                     if open {
@@ -105,42 +118,66 @@ fn walk(nodes: &[ModelNode], path: &mut Vec<usize>, depth: usize, f: &str, out: 
                     out.push(Row { path: path.clone(), depth, label: name.clone(), kind: RowKind::View { tab_index: *tab_index } });
                 }
             }
+            ModelNode::Resource { name, id, children, expanded } => {
+                let matches = f.is_empty() || name.to_ascii_lowercase().contains(f) || any_match(children, f);
+                if matches {
+                    let open = *expanded || !f.is_empty();
+                    out.push(Row { path: path.clone(), depth, label: name.clone(), kind: RowKind::Resource { id: id.clone(), expandable: !children.is_empty(), expanded: open } });
+                    if open {
+                        walk(children, path, depth + 1, f, out);
+                    }
+                }
+            }
+            ModelNode::Link { name, from, to } => {
+                if f.is_empty() || name.to_ascii_lowercase().contains(f) {
+                    out.push(Row { path: path.clone(), depth, label: name.clone(), kind: RowKind::Link { from: from.clone(), to: to.clone() } });
+                }
+            }
         }
         path.pop();
     }
 }
 
-fn has_view(nodes: &[ModelNode]) -> bool {
+fn has_leaf(nodes: &[ModelNode]) -> bool {
     nodes.iter().any(|n| match n {
-        ModelNode::Folder { children, .. } => has_view(children),
-        ModelNode::View { .. } => true,
+        ModelNode::Folder { children, .. } => has_leaf(children),
+        ModelNode::View { .. } | ModelNode::Resource { .. } | ModelNode::Link { .. } => true,
     })
 }
 
 fn any_match(nodes: &[ModelNode], f: &str) -> bool {
     nodes.iter().any(|n| match n {
         ModelNode::Folder { name, children, .. } => name.to_ascii_lowercase().contains(f) || any_match(children, f),
-        ModelNode::View { name, .. } => name.to_ascii_lowercase().contains(f),
+        ModelNode::Resource { name, children, .. } => name.to_ascii_lowercase().contains(f) || any_match(children, f),
+        ModelNode::View { name, .. } | ModelNode::Link { name, .. } => name.to_ascii_lowercase().contains(f),
     })
 }
 
-/// Flip a folder's own fold state. Does nothing to a view — a view has no fold state to flip.
+/// Flip a folder's, or an expandable resource's, own fold state. Does nothing to a leaf that
+/// has no fold state of its own — a view, a link, or a childless resource.
 pub fn toggle(nodes: &mut [ModelNode], path: &[usize]) {
-    if let Some(ModelNode::Folder { expanded, .. }) = get_mut(nodes, path) {
-        *expanded = !*expanded;
+    match get_mut(nodes, path) {
+        Some(ModelNode::Folder { expanded, .. }) => *expanded = !*expanded,
+        Some(ModelNode::Resource { expanded, children, .. }) if !children.is_empty() => *expanded = !*expanded,
+        _ => {}
     }
 }
 
-/// Force a folder open — `→` on a folded one, never on an already-open one or a view.
+/// Force a folder — or an expandable resource — open — `→` on a folded one, never on an
+/// already-open one or a leaf with nothing under it.
 pub fn expand(nodes: &mut [ModelNode], path: &[usize]) {
-    if let Some(ModelNode::Folder { expanded, .. }) = get_mut(nodes, path) {
-        *expanded = true;
+    match get_mut(nodes, path) {
+        Some(ModelNode::Folder { expanded, .. }) => *expanded = true,
+        Some(ModelNode::Resource { expanded, children, .. }) if !children.is_empty() => *expanded = true,
+        _ => {}
     }
 }
 
 pub fn collapse(nodes: &mut [ModelNode], path: &[usize]) {
-    if let Some(ModelNode::Folder { expanded, .. }) = get_mut(nodes, path) {
-        *expanded = false;
+    match get_mut(nodes, path) {
+        Some(ModelNode::Folder { expanded, .. }) => *expanded = false,
+        Some(ModelNode::Resource { expanded, .. }) => *expanded = false,
+        _ => {}
     }
 }
 
@@ -151,8 +188,8 @@ fn get_mut<'a>(nodes: &'a mut [ModelNode], path: &[usize]) -> Option<&'a mut Mod
         return Some(node);
     }
     match node {
-        ModelNode::Folder { children, .. } => get_mut(children, rest),
-        ModelNode::View { .. } => None,
+        ModelNode::Folder { children, .. } | ModelNode::Resource { children, .. } => get_mut(children, rest),
+        ModelNode::View { .. } | ModelNode::Link { .. } => None,
     }
 }
 
@@ -163,8 +200,8 @@ pub struct Browser<'a> {
 
 impl Widget for Browser<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let inner = chrome::panel(buf, area, "model tree — a coArchi import's own folders", theme::t().aqua);
-        let hint = " type to search   ↑/↓ pick   enter/→ open   ← fold   esc";
+        let inner = chrome::panel(buf, area, "model tree", theme::t().aqua);
+        let hint = " type to search   ↑/↓ pick   enter picks/opens   → expand   ← fold   esc";
         let body = chrome::hint(buf, inner, hint);
         if body.height < 2 {
             return;
@@ -191,15 +228,21 @@ impl Widget for Browser<'_> {
         for (i, row) in all.iter().enumerate().skip(off).take(view) {
             let on = i == cur;
             let indent = "  ".repeat(row.depth);
-            let glyph = match row.kind {
+            let glyph = match &row.kind {
                 RowKind::Folder { expanded: true, .. } => "▾",
                 RowKind::Folder { expanded: false, .. } => "▸",
                 RowKind::View { .. } => "◆",
+                RowKind::Resource { expandable: true, expanded: true, .. } => "●▾",
+                RowKind::Resource { expandable: true, expanded: false, .. } => "●▸",
+                RowKind::Resource { expandable: false, .. } => "●",
+                RowKind::Link { .. } => "→",
             };
             let text = format!("{indent}{glyph} {}", row.label);
-            let base = match row.kind {
+            let base = match &row.kind {
                 RowKind::Folder { .. } => theme::t().yellow,
                 RowKind::View { .. } => theme::t().ink,
+                RowKind::Resource { .. } => theme::t().aqua,
+                RowKind::Link { .. } => theme::t().dim,
             };
             let style = if on { Style::new().fg(theme::t().inverse).bg(theme::t().aqua).bold() } else { Style::new().fg(base) };
             lines.push(Line::styled(fit(&text, body.width as usize), style));
@@ -263,6 +306,37 @@ mod tests {
     fn a_folder_with_no_view_anywhere_under_it_never_appears() {
         let tree = vec![ModelNode::Folder { name: "Empty Category".into(), expanded: true, children: Vec::new() }];
         assert!(rows(&tree, "").is_empty());
+    }
+
+    #[test]
+    fn a_resource_is_pickable_and_separately_foldable_and_a_link_is_a_plain_leaf() {
+        let mut tree = vec![ModelNode::Folder {
+            name: "CRM".into(),
+            expanded: true,
+            children: vec![
+                ModelNode::Resource {
+                    name: "Customer".into(),
+                    id: "ot.customer".into(),
+                    expanded: false,
+                    children: vec![ModelNode::Link { name: "→ Order".into(), from: "ot.customer".into(), to: "ot.order".into() }],
+                },
+                ModelNode::Resource { name: "Loose".into(), id: "ot.loose".into(), expanded: false, children: Vec::new() },
+            ],
+        }];
+        let closed = rows(&tree, "");
+        assert_eq!(closed.len(), 3, "CRM open, Customer and Loose shown, Customer's own link still folded");
+        assert!(matches!(&closed[1].kind, RowKind::Resource { expandable: true, expanded: false, .. }), "Customer has something to expand");
+        assert!(matches!(&closed[2].kind, RowKind::Resource { expandable: false, .. }), "Loose has nothing nested under it");
+
+        expand(&mut tree, &[0, 0]);
+        let opened = rows(&tree, "");
+        assert_eq!(opened.len(), 4);
+        assert_eq!(opened[2].label, "→ Order");
+        assert!(matches!(&opened[2].kind, RowKind::Link { from, to } if from == "ot.customer" && to == "ot.order"));
+
+        // → on Loose, which has nothing under it, does nothing — it stays a plain leaf.
+        expand(&mut tree, &[0, 1]);
+        assert!(matches!(&rows(&tree, "")[3].kind, RowKind::Resource { expandable: false, .. }));
     }
 
     #[test]

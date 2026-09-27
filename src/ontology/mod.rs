@@ -62,6 +62,16 @@ pub enum Layer {
     /// layer of the architecture: the digital twin sits beside the business it models and
     /// the applications that read it.
     Ontology,
+    /// The Common Core Ontologies' mid-level classes — Agent, Artifact, Act, Information
+    /// Content Entity — grounded in BFO below and reached for by a domain type above. This is
+    /// the seam: an object type is never grounded straight in [`Layer::UpperOntology`], only
+    /// through here, the way a business process never touches a component straight — always
+    /// through a service.
+    CommonCore,
+    /// The Basic Formal Ontology's top-level backbone — Continuant, Occurrent, and what each
+    /// divides into — used unchanged from BFO 2020 (ISO/IEC 21838-2). The most abstract layer
+    /// there is: everything else in the architecture is, eventually, a kind of something here.
+    UpperOntology,
     Composite,
     /// Plain shapes with no architectural meaning: a box, a circle, an arrow's worth of
     /// diamond. For the parts of a picture the ontology has no word for.
@@ -81,14 +91,16 @@ impl Layer {
             Layer::Technology => Some([201, 231, 183]),
             Layer::Implementation => Some([255, 224, 224]),
             Layer::Ontology => Some([226, 238, 250]),
+            Layer::CommonCore => Some([210, 232, 226]),
+            Layer::UpperOntology => Some([223, 223, 223]),
             Layer::Composite => None,
             Layer::Sketch => Some([255, 255, 255]),
         }
     }
 
     /// Palette and layout order: the *why* on top, the stack beneath it, the *when* under that,
-    /// and the plain shapes last.
-    pub const ALL: [Layer; 9] = [
+    /// the ontology grounded in increasingly abstract classes, and the plain shapes last.
+    pub const ALL: [Layer; 11] = [
         Layer::Motivation,
         Layer::Strategy,
         Layer::Business,
@@ -96,6 +108,8 @@ impl Layer {
         Layer::Technology,
         Layer::Implementation,
         Layer::Ontology,
+        Layer::CommonCore,
+        Layer::UpperOntology,
         Layer::Composite,
         Layer::Sketch,
     ];
@@ -109,6 +123,8 @@ impl Layer {
             Layer::Technology => "technology",
             Layer::Implementation => "implementation",
             Layer::Ontology => "ontology",
+            Layer::CommonCore => "common core",
+            Layer::UpperOntology => "upper ontology",
             Layer::Composite => "composite",
             Layer::Sketch => "sketch",
         }
@@ -123,6 +139,8 @@ impl Layer {
             Layer::Technology => "the infrastructure: nodes, devices, networks, what runs on them",
             Layer::Implementation => "when — the work packages, deliverables and plateaus of getting there",
             Layer::Ontology => "a data platform's ontology: object types with their properties, link types, interfaces, action types",
+            Layer::CommonCore => "the Common Core Ontologies: Agent, Artifact, Act, Information Content Entity — the seam an object type is grounded through",
+            Layer::UpperOntology => "the Basic Formal Ontology: Continuant and Occurrent, and what each divides into — the top of everything",
             Layer::Composite => "boxes drawn around any of it: a grouping, a place",
             Layer::Sketch => "plain shapes — a box, a circle, a note — for what the ontology has no word for",
         }
@@ -343,6 +361,69 @@ pub enum ShapeKind {
     /// "A label that helps you categorize your object types": a box around the object types
     /// it groups.
     ObjectTypeGroup,
+    // ── the Common Core Ontologies: the seam an object type is grounded through ────────────
+    /// A material entity capable of participating in an act by exercising its own abilities.
+    CcoAgent,
+    /// An agent who is a single human being.
+    CcoPerson,
+    /// An agent that is composed of member agents, or has members with designated positions.
+    CcoOrganization,
+    /// An object intentionally made by an agent to serve a purpose.
+    CcoArtifact,
+    /// A process that is intentionally performed by an agent.
+    CcoAct,
+    /// A process, agentive or not — broader than an act.
+    CcoEvent,
+    /// A generically dependent continuant whose concretization carries information.
+    CcoInformationContentEntity,
+    /// An information content entity that directs a process to happen a certain way: a plan,
+    /// a schema, an objective.
+    CcoDirectiveInformationContentEntity,
+    /// An information content entity that describes or represents something: a record.
+    CcoDescriptiveInformationContentEntity,
+    /// A immaterial entity that is a portion of the earth's surface.
+    CcoGeospatialRegion,
+    /// An artifact that is a man-made, fixed structure.
+    CcoFacility,
+    // ── the Basic Formal Ontology: the top of everything, used unchanged from BFO 2020 ──────
+    /// The root: anything that exists, has existed, or will exist.
+    BfoEntity,
+    /// An entity that persists through time while maintaining its identity, and has no
+    /// temporal parts.
+    BfoContinuant,
+    /// An entity that unfolds in time, or is a temporal or spatiotemporal region.
+    BfoOccurrent,
+    /// A continuant that does not depend on another entity to exist.
+    BfoIndependentContinuant,
+    /// A continuant that depends on one specific other entity to exist: a quality, a role, a
+    /// disposition.
+    BfoSpecificallyDependentContinuant,
+    /// A continuant that depends on some entity or other, but not on any one in particular: a
+    /// piece of information, copyable without losing its identity.
+    BfoGenericallyDependentContinuant,
+    /// An independent continuant that has mass: an organism, an object, a portion of matter.
+    BfoMaterialEntity,
+    /// An independent continuant with no mass: a boundary, a site, a spatial region it is
+    /// the shape of.
+    BfoImmaterialEntity,
+    /// A specifically dependent continuant that inheres in its bearer without needing a
+    /// context to be realized: a mass, a colour, a length.
+    BfoQuality,
+    /// A specifically dependent continuant that is not always exercised, but can be: a role, a
+    /// disposition — realized in a process when its bearer is put to it.
+    BfoRealizableEntity,
+    /// A realizable entity that exists because of some circumstance, and could be otherwise:
+    /// "student", "customer" — not what a thing is, but what it is doing right now.
+    BfoRole,
+    /// A realizable entity a bearer has because of its physical makeup, realized when the
+    /// circumstances are right: fragility, solubility.
+    BfoDisposition,
+    /// A disposition a bearer has because it was designed, selected or shaped for it, and
+    /// realized in one characteristic way: the function of a heart is to pump blood.
+    BfoFunction,
+    /// An occurrent that has temporal parts and depends on the material entity that
+    /// participates in it: a process.
+    BfoProcess,
     // composite
     Grouping,
     Location,
@@ -385,7 +466,7 @@ use ShapeKind::*;
 
 impl ShapeKind {
     /// Palette order: by layer, and within a layer active → behaviour → passive.
-    pub const ALL: [ShapeKind; 83] = [
+    pub const ALL: [ShapeKind; 108] = [
         Stakeholder, Driver, Assessment, Goal, Outcome, Principle, Requirement, Constraint,
         Resource, Capability, ValueStream, CourseOfAction,
         BusinessActor, BusinessRole, BusinessInterface, BusinessProcess, BusinessFunction,
@@ -396,6 +477,13 @@ impl ShapeKind {
         TechnologyFunction, TechnologyProcess, TechnologyService, Artifact,
         WorkPackage, Deliverable, ImplementationEvent, Plateau, Gap,
         ObjectType, Interface, ActionType, Function, SharedProperty, ValueType, Datasource, ObjectTypeGroup,
+        CcoAgent, CcoPerson, CcoOrganization, CcoArtifact, CcoAct, CcoEvent,
+        CcoInformationContentEntity, CcoDirectiveInformationContentEntity,
+        CcoDescriptiveInformationContentEntity, CcoGeospatialRegion, CcoFacility,
+        BfoEntity, BfoContinuant, BfoOccurrent, BfoIndependentContinuant,
+        BfoSpecificallyDependentContinuant, BfoGenericallyDependentContinuant,
+        BfoMaterialEntity, BfoImmaterialEntity, BfoQuality, BfoRealizableEntity, BfoRole,
+        BfoDisposition, BfoFunction, BfoProcess,
         Grouping, Location,
         Box, RoundedBox, Circle, Diamond, Cylinder, Cloud, Parallelogram, Hexagon, Text,
         Square, Ellipse, Triangle, PredefinedProcess, Document, InternalStorage, Cube, Step, Trapezoid, Tape, Note, Card, Callout, StickFigure, DataStorage, Delay, Display, ManualInput, OffPage, BlockArrow, DoubleArrow, And, Or,
@@ -453,6 +541,31 @@ impl ShapeKind {
             ValueType => "Value Type",
             Datasource => "Datasource",
             ObjectTypeGroup => "Object Type Group",
+            CcoAgent => "Agent",
+            CcoPerson => "Person",
+            CcoOrganization => "Organization",
+            CcoArtifact => "Artifact (CCO)",
+            CcoAct => "Act",
+            CcoEvent => "Event (CCO)",
+            CcoInformationContentEntity => "Information Content Entity",
+            CcoDirectiveInformationContentEntity => "Directive Information Content Entity",
+            CcoDescriptiveInformationContentEntity => "Descriptive Information Content Entity",
+            CcoGeospatialRegion => "Geospatial Region",
+            CcoFacility => "Facility",
+            BfoEntity => "Entity",
+            BfoContinuant => "Continuant",
+            BfoOccurrent => "Occurrent",
+            BfoIndependentContinuant => "Independent Continuant",
+            BfoSpecificallyDependentContinuant => "Specifically Dependent Continuant",
+            BfoGenericallyDependentContinuant => "Generically Dependent Continuant",
+            BfoMaterialEntity => "Material Entity",
+            BfoImmaterialEntity => "Immaterial Entity",
+            BfoQuality => "Quality",
+            BfoRealizableEntity => "Realizable Entity",
+            BfoRole => "Role (BFO)",
+            BfoDisposition => "Disposition",
+            BfoFunction => "Function (BFO)",
+            BfoProcess => "Process (BFO)",
             Grouping => "Grouping",
             Location => "Location",
             Box => "Box",
@@ -543,6 +656,31 @@ impl ShapeKind {
             ValueType => "value type",
             Datasource => "dataset",
             ObjectTypeGroup => "group",
+            CcoAgent => "agent",
+            CcoPerson => "person",
+            CcoOrganization => "org",
+            CcoArtifact => "artifact",
+            CcoAct => "act",
+            CcoEvent => "event",
+            CcoInformationContentEntity => "ICE",
+            CcoDirectiveInformationContentEntity => "dir ICE",
+            CcoDescriptiveInformationContentEntity => "desc ICE",
+            CcoGeospatialRegion => "geo region",
+            CcoFacility => "facility",
+            BfoEntity => "entity",
+            BfoContinuant => "continuant",
+            BfoOccurrent => "occurrent",
+            BfoIndependentContinuant => "indep cont",
+            BfoSpecificallyDependentContinuant => "spec dep cont",
+            BfoGenericallyDependentContinuant => "gen dep cont",
+            BfoMaterialEntity => "material",
+            BfoImmaterialEntity => "immaterial",
+            BfoQuality => "quality",
+            BfoRealizableEntity => "realizable",
+            BfoRole => "role",
+            BfoDisposition => "disposition",
+            BfoFunction => "bfo func",
+            BfoProcess => "bfo proc",
             Grouping => "group",
             Location => "location",
             Box => "box",
@@ -632,6 +770,31 @@ impl ShapeKind {
             ValueType => "value_type",
             Datasource => "datasource",
             ObjectTypeGroup => "object_type_group",
+            CcoAgent => "cco-agent",
+            CcoPerson => "cco-person",
+            CcoOrganization => "cco-organization",
+            CcoArtifact => "cco-artifact",
+            CcoAct => "cco-act",
+            CcoEvent => "cco-event",
+            CcoInformationContentEntity => "cco-information-content-entity",
+            CcoDirectiveInformationContentEntity => "cco-directive-information-content-entity",
+            CcoDescriptiveInformationContentEntity => "cco-descriptive-information-content-entity",
+            CcoGeospatialRegion => "cco-geospatial-region",
+            CcoFacility => "cco-facility",
+            BfoEntity => "bfo-entity",
+            BfoContinuant => "bfo-continuant",
+            BfoOccurrent => "bfo-occurrent",
+            BfoIndependentContinuant => "bfo-independent-continuant",
+            BfoSpecificallyDependentContinuant => "bfo-specifically-dependent-continuant",
+            BfoGenericallyDependentContinuant => "bfo-generically-dependent-continuant",
+            BfoMaterialEntity => "bfo-material-entity",
+            BfoImmaterialEntity => "bfo-immaterial-entity",
+            BfoQuality => "bfo-quality",
+            BfoRealizableEntity => "bfo-realizable-entity",
+            BfoRole => "bfo-role",
+            BfoDisposition => "bfo-disposition",
+            BfoFunction => "bfo-function",
+            BfoProcess => "bfo-process",
             Grouping => "grouping",
             Location => "location",
             Box => "box",
@@ -708,6 +871,15 @@ impl ShapeKind {
             }
             WorkPackage | Deliverable | ImplementationEvent | Plateau | Gap => Layer::Implementation,
             ObjectType | Interface | ActionType | Function | SharedProperty | ValueType | Datasource | ObjectTypeGroup => Layer::Ontology,
+            CcoAgent | CcoPerson | CcoOrganization | CcoArtifact | CcoAct | CcoEvent
+            | CcoInformationContentEntity | CcoDirectiveInformationContentEntity
+            | CcoDescriptiveInformationContentEntity | CcoGeospatialRegion | CcoFacility => {
+                Layer::CommonCore
+            }
+            BfoEntity | BfoContinuant | BfoOccurrent | BfoIndependentContinuant
+            | BfoSpecificallyDependentContinuant | BfoGenericallyDependentContinuant
+            | BfoMaterialEntity | BfoImmaterialEntity | BfoQuality | BfoRealizableEntity
+            | BfoRole | BfoDisposition | BfoFunction | BfoProcess => Layer::UpperOntology,
             Grouping | Location => Layer::Composite,
             Box | RoundedBox | Circle | Diamond | Cylinder | Cloud | Parallelogram | Hexagon | Text => Layer::Sketch,
             Square | Ellipse | Triangle | PredefinedProcess | Document | InternalStorage | Cube | Step | Trapezoid | Tape | Note | Card | Callout | StickFigure | DataStorage | Delay | Display | ManualInput | OffPage | BlockArrow | DoubleArrow | And | Or => Layer::Sketch,
@@ -732,6 +904,14 @@ impl ShapeKind {
             ObjectType | Interface | SharedProperty | ValueType | Datasource => Category::Passive,
             ActionType | Function => Category::Behaviour,
             ObjectTypeGroup => Category::Composite,
+            CcoAgent | CcoPerson | CcoOrganization => Category::Active,
+            CcoAct | CcoEvent | BfoOccurrent | BfoProcess => Category::Behaviour,
+            CcoArtifact | CcoInformationContentEntity | CcoDirectiveInformationContentEntity
+            | CcoDescriptiveInformationContentEntity | CcoGeospatialRegion | CcoFacility
+            | BfoEntity | BfoContinuant | BfoIndependentContinuant
+            | BfoSpecificallyDependentContinuant | BfoGenericallyDependentContinuant
+            | BfoMaterialEntity | BfoImmaterialEntity | BfoQuality | BfoRealizableEntity
+            | BfoRole | BfoDisposition | BfoFunction => Category::Passive,
             Grouping | Location => Category::Composite,
             Box | RoundedBox | Circle | Diamond | Cylinder | Cloud | Parallelogram | Hexagon | Text => Category::Shape,
             Square | Ellipse | Triangle | PredefinedProcess | Document | InternalStorage | Cube | Step | Trapezoid | Tape | Note | Card | Callout | StickFigure | DataStorage | Delay | Display | ManualInput | OffPage | BlockArrow | DoubleArrow | And | Or => Category::Shape,
@@ -776,6 +956,16 @@ impl ShapeKind {
             ValueType => Shape::Note,
             Datasource => Shape::Cylinder,
             ObjectTypeGroup => Shape::Dashed,
+            // The Common Core and BFO classes borrow the core stack's convention: an agent is
+            // round, a process is rounded, everything else is a plain box.
+            CcoAgent | CcoPerson | CcoOrganization => Shape::Ellipse,
+            CcoAct | CcoEvent | BfoOccurrent | BfoProcess => Shape::RoundedRectangle,
+            CcoArtifact | CcoInformationContentEntity | CcoDirectiveInformationContentEntity
+            | CcoDescriptiveInformationContentEntity | CcoGeospatialRegion | CcoFacility
+            | BfoEntity | BfoContinuant | BfoIndependentContinuant
+            | BfoSpecificallyDependentContinuant | BfoGenericallyDependentContinuant
+            | BfoMaterialEntity | BfoImmaterialEntity | BfoQuality | BfoRealizableEntity
+            | BfoRole | BfoDisposition | BfoFunction => Shape::Rectangle,
             Grouping | Location => Shape::Dashed,
             // The plain shapes are their own outline, and nothing else.
             Box => Shape::Rectangle,
@@ -925,6 +1115,31 @@ impl ShapeKind {
             ValueType => "a field type with meaning and constraints — an Email, a PercentOfCapacity",
             Datasource => "the dataset or model an object type is backed by",
             ObjectTypeGroup => "a label that groups object types — a box around them",
+            CcoAgent => "a material entity able to act — a person, an organization, a system",
+            CcoPerson => "an agent who is a single human being",
+            CcoOrganization => "an agent made of members, or with designated positions",
+            CcoArtifact => "an object intentionally made by an agent to serve a purpose",
+            CcoAct => "a process intentionally performed by an agent",
+            CcoEvent => "a process, agentive or not — broader than an act",
+            CcoInformationContentEntity => "a generically dependent continuant whose concretization carries information",
+            CcoDirectiveInformationContentEntity => "an information content entity that directs a process — a plan, a schema",
+            CcoDescriptiveInformationContentEntity => "an information content entity that describes something — a record",
+            CcoGeospatialRegion => "an immaterial entity that is a portion of the earth's surface",
+            CcoFacility => "an artifact that is a man-made, fixed structure",
+            BfoEntity => "the root: anything that exists, has existed, or will exist",
+            BfoContinuant => "persists through time with its identity intact, and has no temporal parts",
+            BfoOccurrent => "unfolds in time — a process, or a temporal or spatiotemporal region",
+            BfoIndependentContinuant => "a continuant that does not depend on another entity to exist",
+            BfoSpecificallyDependentContinuant => "a continuant that depends on one specific other entity — a quality, a role",
+            BfoGenericallyDependentContinuant => "a continuant that depends on some entity or other, not one in particular",
+            BfoMaterialEntity => "an independent continuant that has mass",
+            BfoImmaterialEntity => "an independent continuant with no mass — a boundary, a site",
+            BfoQuality => "inheres in its bearer without needing a context to be realized",
+            BfoRealizableEntity => "not always exercised, but can be — a role, a disposition",
+            BfoRole => "exists because of a circumstance, and could be otherwise — \"customer\", \"student\"",
+            BfoDisposition => "exists because of a bearer's physical makeup — fragility, solubility",
+            BfoFunction => "a disposition a bearer has because it was made or shaped for it",
+            BfoProcess => "an occurrent with temporal parts, depending on the entity that participates in it",
             Grouping => "a box around related elements, of any kind — a domain, a system boundary",
             Location => "a place — a data centre, a region, an office",
             Box => "a plain rectangle — a box that means whatever you write in it",
@@ -1015,6 +1230,31 @@ impl ShapeKind {
             ValueType => "A semantic wrapper around a field type — its base type, plus constraints (a pattern, a range, allowed values) and meaning. A property adopts it and inherits its rules.",
             Datasource => "The dataset or model that backs an object type — where its objects come from. Drawn when the picture is about lineage rather than shape.",
             ObjectTypeGroup => "A label that categorizes object types. A dashed box: the object types inside it belong to the group, and move with it.",
+            CcoAgent => "A material entity capable of participating in an act by exercising its own abilities: a person, an organization, a piece of software. Person and Organization are subsumed by it; it is grounded in Material Entity.",
+            CcoPerson => "An agent who is a single human being. Subsumed by Agent — draw is-a to Agent, not straight to Material Entity.",
+            CcoOrganization => "An agent composed of member agents, or with designated positions members fill: a company, a department, a government. Subsumed by Agent.",
+            CcoArtifact => "An object intentionally made by an agent to serve a purpose: a tool, a document's medium, a building. Subsumed by Material Entity. A Facility is a fixed kind of it.",
+            CcoAct => "A process intentionally performed by an agent: an approval, a shipment. Subsumed by Process (BFO). Narrower than Event, which does not require an agent.",
+            CcoEvent => "A process, agentive or not: a storm, a market crash, an act. Subsumed by Process (BFO).",
+            CcoInformationContentEntity => "A generically dependent continuant whose concretization on some bearer carries information: a schema, a record, a message. Subsumed by Generically Dependent Continuant. Directive and Descriptive information content entities are subtypes of it.",
+            CcoDirectiveInformationContentEntity => "An information content entity that directs a process to happen a certain way: a plan, a schema, an objective. Subsumed by Information Content Entity.",
+            CcoDescriptiveInformationContentEntity => "An information content entity that describes or represents something: a record, a report. Subsumed by Information Content Entity.",
+            CcoGeospatialRegion => "An immaterial entity that is a portion of the earth's surface: a country, a site, a service area. Subsumed by Immaterial Entity (BFO).",
+            CcoFacility => "An artifact that is a man-made, fixed structure: a building, a plant, a data centre. Subsumed by Artifact (CCO).",
+            BfoEntity => "The root of everything: anything that exists, has existed, or will exist. Nothing is subsumed by anything but this at the top, and this is subsumed by nothing.",
+            BfoContinuant => "An entity that persists through time while maintaining its identity, and has no temporal parts — unlike an occurrent. Subsumed by Entity. Independent, Specifically Dependent and Generically Dependent Continuant are subtypes of it.",
+            BfoOccurrent => "An entity that unfolds in time, or is a temporal or spatiotemporal region: a process, an act, an event. Subsumed by Entity. Process is a subtype of it.",
+            BfoIndependentContinuant => "A continuant that does not depend on another entity to exist: it could be the only thing in the universe. Subsumed by Continuant. Material Entity and Immaterial Entity are subtypes of it.",
+            BfoSpecificallyDependentContinuant => "A continuant that depends on one specific other entity to exist: a headache depends on the head that has it. Subsumed by Continuant. Quality and Realizable Entity are subtypes of it.",
+            BfoGenericallyDependentContinuant => "A continuant that depends on some entity or other, but not on any one in particular, and can be copied without losing its identity: information. Subsumed by Continuant. Information Content Entity (CCO) is a subtype of it.",
+            BfoMaterialEntity => "An independent continuant that has mass: an organism, an object, a portion of matter. Subsumed by Independent Continuant. Agent and Artifact (CCO) are subsumed by it.",
+            BfoImmaterialEntity => "An independent continuant with no mass: a boundary, a site, the hole in a donut. Subsumed by Independent Continuant. Geospatial Region (CCO) is subsumed by it.",
+            BfoQuality => "A specifically dependent continuant that inheres in its bearer without needing any particular circumstance to be realized: a mass, a colour, a length. Subsumed by Specifically Dependent Continuant.",
+            BfoRealizableEntity => "A specifically dependent continuant that is not always being exercised but can be, and is realized in a process when its bearer is put to it: a role, a disposition. Subsumed by Specifically Dependent Continuant. Role and Disposition are subtypes of it.",
+            BfoRole => "A realizable entity that exists because of some circumstance and could be otherwise: \"customer\", \"employee of\". Subsumed by Realizable Entity — not what a thing is, but what it is doing.",
+            BfoDisposition => "A realizable entity a bearer has because of its physical makeup, realized when the circumstances are right: fragility is realized in breaking. Subsumed by Realizable Entity. Function is a subtype of it.",
+            BfoFunction => "A disposition a bearer has because it was designed, selected or evolved for it, and realized in one characteristic way: the function of a heart is to pump blood. Subsumed by Disposition.",
+            BfoProcess => "An occurrent that has temporal parts and depends on the material entity that participates in it: something happening. Subsumed by Occurrent. Act and Event (CCO) are subsumed by it.",
             Grouping => "A boundary drawn around related elements, of any kind: a system boundary, a domain, a bounded context. Elements inside it move with it. Aggregates whatever it contains.",
             Location => "A place: a data centre, a cloud region, an office. Aggregates the actors and nodes that are there.",
             Box => "A rectangle and nothing more. Use it for the parts of a picture the ontology has no word for — a legend, a system you have not classified yet, a thing from another notation. The rules leave plain shapes alone: a line between two of them is an association, an arrow is a flow, and nothing is ever refused.",
@@ -1093,6 +1333,11 @@ pub enum RelationKind {
     Uses,
     /// An object type is backed by a datasource.
     BackedBy,
+    // ── alignment: grounding a domain type in the common core and the upper ontology ───────
+    /// "Is a kind of" — a child class subsumed by its one real parent, up through the Common
+    /// Core Ontologies and into BFO. An object type reaches the common core this way, never
+    /// straight to the upper ontology: the common core is the seam.
+    SubsumedBy,
     Association,
     /// A plain link: a line whose look you choose, and which means nothing to the rules.
     /// What a freeform diagram joins its shapes with, and always allowed anywhere.
@@ -1588,7 +1833,7 @@ impl RelationKind {
     /// the others — specialization, then association, which says the least, and the plain
     /// link, which says nothing at all. Association and link must stay last: the picker's
     /// default is the first allowed row, and that has to be the most specific one.
-    pub const ALL: [RelationKind; 23] = [
+    pub const ALL: [RelationKind; 24] = [
         Composition,
         Aggregation,
         Assignment,
@@ -1609,6 +1854,7 @@ impl RelationKind {
         Links,
         Unlinks,
         Calls,
+        SubsumedBy,
         Specialization,
         Association,
         Link,
@@ -1622,6 +1868,7 @@ impl RelationKind {
             Triggering | Flow => Family::Dynamic,
             LinkType | Implements | Extends | Uses | BackedBy => Family::Schema,
             Creates | Modifies | Deletes | Links | Unlinks | Calls => Family::Rules,
+            SubsumedBy => Family::Alignment,
             Specialization | Association | Link => Family::Other,
         }
     }
@@ -1655,6 +1902,7 @@ impl RelationKind {
             Calls => "calls",
             Uses => "uses",
             BackedBy => "backed-by",
+            SubsumedBy => "subsumed-by",
             Association => "association",
             Link => "link",
         }
@@ -1689,6 +1937,7 @@ impl RelationKind {
             Calls => "calls",
             Uses => "uses",
             BackedBy => "is backed by",
+            SubsumedBy => "is subsumed by",
             Association => "is associated with",
             Link => "is linked to",
         }
@@ -1730,6 +1979,7 @@ impl RelationKind {
             Calls => "this action is backed by that function",
             Uses => "this type uses that shared property or value type",
             BackedBy => "this object type's objects come from that datasource",
+            SubsumedBy => "this is a kind of that, up through the common core and into BFO",
             Association => "related, in a way none of the others says",
             Link => "a plain line — its look is yours to set, and it means nothing to the rules",
         }
@@ -1758,6 +2008,7 @@ impl RelationKind {
             Calls => "A function-backed action: its edits are computed by the function rather than declared as rules. From the action to the function.",
             Uses => "A type uses a shared property or a value type. An object type's property row already marks the sharing; draw the line when the shared definition itself is on the diagram and the sharing is the point.",
             BackedBy => "An object type's objects come from a datasource — a dataset or a model. Drawn when the picture is about lineage.",
+            SubsumedBy => "Is-a, grounded: a child class subsumed by its one real parent, drawn between two Common Core classes, two BFO classes, a Common Core class and the BFO class it is grounded in, or an object type / interface and the Common Core class it is classified under. An object type is never subsumed straight into the upper ontology — the common core is the seam, the way a business process never touches a component straight, only through a service. Two object types from different sources subsumed by the same class are what makes them interoperable: a query joining them is now a claim the model licenses.",
             Association => "The relation for when none of the others is right. Always allowed, and therefore says the least — reach for it last.",
             Link => "A line and nothing more, the way a general-purpose diagram tool draws one. What a freeform diagram joins its shapes with. Its look is configured on the link itself — the line solid, dashed or dotted, and either end nothing, an arrow, a triangle, a diamond, a dot, or an entity-relationship crow's foot, bar or ring. Always allowed, anywhere.",
         }
@@ -1784,6 +2035,8 @@ impl RelationKind {
             Calls => n(Dotted, End::None, End::Open),
             Uses => n(Dotted, End::None, End::None),
             BackedBy => n(Solid, End::None, End::Dot),
+            // The same look as specialization: an is-a arrow, scoped to a different layer.
+            SubsumedBy => n(Solid, End::None, End::Triangle),
             Association => n(Solid, End::None, End::None),
             Link => n(Solid, End::None, End::Arrow),
         }
@@ -1804,11 +2057,12 @@ pub enum Family {
     Dynamic,
     Schema,
     Rules,
+    Alignment,
     Other,
 }
 
 impl Family {
-    pub const ALL: [Family; 6] = [Family::Structural, Family::Dependency, Family::Dynamic, Family::Schema, Family::Rules, Family::Other];
+    pub const ALL: [Family; 7] = [Family::Structural, Family::Dependency, Family::Dynamic, Family::Schema, Family::Rules, Family::Alignment, Family::Other];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -1817,6 +2071,7 @@ impl Family {
             Family::Dynamic => "dynamic",
             Family::Schema => "ontology schema",
             Family::Rules => "action rules",
+            Family::Alignment => "alignment",
             Family::Other => "other",
         }
     }
@@ -1828,6 +2083,7 @@ impl Family {
             Family::Dynamic => "what starts what, and what moves between them",
             Family::Schema => "how the ontology's types fit together",
             Family::Rules => "what an action type does to objects when it runs",
+            Family::Alignment => "grounding a domain type in the common core and BFO",
             Family::Other => "is-a, and the lines that say the least",
         }
     }
@@ -1891,6 +2147,14 @@ pub fn allowed(rel: RelationKind, src: ShapeKind, dst: ShapeKind) -> Result<(), 
     // meaning to attach to.
     if rel == Link {
         return Ok(());
+    }
+    // Alignment — the common core and the upper ontology — has a grammar of its own, and
+    // reaches into the ontology layer at one seam: an object type or interface classified
+    // under a common-core class. Checked before the ontology dispatch below, since that seam
+    // has one side in `Layer::Ontology` and would otherwise be swallowed by it.
+    let aligned = |l: Layer| matches!(l, Layer::CommonCore | Layer::UpperOntology);
+    if rel == SubsumedBy || aligned(sl) || aligned(dl) {
+        return allowed_alignment(rel, src, dst);
     }
     // The ontology layer has a grammar of its own, and the architecture's relations mean
     // nothing there — nor its relations in the architecture.
@@ -2073,6 +2337,7 @@ pub fn allowed(rel: RelationKind, src: ShapeKind, dst: ShapeKind) -> Result<(), 
         LinkType | Implements | Extends | Creates | Modifies | Deletes | Links | Unlinks | Calls | Uses | BackedBy => {
             unreachable!("the ontology's relations were routed to their own rules above")
         }
+        SubsumedBy => unreachable!("subsumed-by was routed to the alignment rules above"),
     }
 }
 
@@ -2160,6 +2425,91 @@ fn allowed_ontology(rel: RelationKind, src: ShapeKind, dst: ShapeKind) -> Result
     }
 }
 
+/// Each common-core or upper-ontology class's one real parent, and the reason to give if a
+/// diagram subsumes it under the wrong one. `None` for `BfoEntity`, the root — and for
+/// anything that is not an alignment class, which never calls this.
+fn upper_parent(k: ShapeKind) -> Option<(ShapeKind, &'static str)> {
+    match k {
+        BfoEntity => None,
+        BfoContinuant => Some((BfoEntity, "a continuant is subsumed by entity, the root of the upper ontology")),
+        BfoOccurrent => Some((BfoEntity, "an occurrent is subsumed by entity, the root of the upper ontology")),
+        BfoIndependentContinuant => {
+            Some((BfoContinuant, "an independent continuant is a kind of continuant, not of anything dependent"))
+        }
+        BfoSpecificallyDependentContinuant => {
+            Some((BfoContinuant, "a specifically dependent continuant is a kind of continuant"))
+        }
+        BfoGenericallyDependentContinuant => {
+            Some((BfoContinuant, "a generically dependent continuant is a kind of continuant"))
+        }
+        BfoMaterialEntity => Some((
+            BfoIndependentContinuant,
+            "a material entity is a kind of independent continuant, not a continuant directly or anything dependent",
+        )),
+        BfoImmaterialEntity => Some((BfoIndependentContinuant, "an immaterial entity is a kind of independent continuant")),
+        BfoQuality => Some((
+            BfoSpecificallyDependentContinuant,
+            "a quality is a kind of specifically dependent continuant, not a realizable entity — a quality is not exercised, it just inheres",
+        )),
+        BfoRealizableEntity => {
+            Some((BfoSpecificallyDependentContinuant, "a realizable entity is a kind of specifically dependent continuant"))
+        }
+        BfoRole => Some((BfoRealizableEntity, "a role is a kind of realizable entity, not a disposition — draw is-a to Realizable Entity")),
+        BfoDisposition => Some((BfoRealizableEntity, "a disposition is a kind of realizable entity, not a role")),
+        BfoFunction => Some((BfoDisposition, "a function is a kind of disposition, not a bare role or realizable entity — draw is-a to Disposition")),
+        BfoProcess => Some((BfoOccurrent, "a process is a kind of occurrent, not a continuant")),
+        CcoAgent => Some((BfoMaterialEntity, "an agent is grounded in material entity, not straight in independent continuant")),
+        CcoPerson => Some((CcoAgent, "a person is a kind of agent — draw is-a to Agent, not straight to Material Entity")),
+        CcoOrganization => Some((CcoAgent, "an organization is a kind of agent — draw is-a to Agent, not straight to Material Entity")),
+        CcoArtifact => Some((BfoMaterialEntity, "an artifact is grounded in material entity")),
+        CcoAct => Some((BfoProcess, "an act is grounded in process — an intentional one, but still a process")),
+        CcoEvent => Some((BfoProcess, "an event is grounded in process")),
+        CcoInformationContentEntity => {
+            Some((BfoGenericallyDependentContinuant, "an information content entity is grounded in generically dependent continuant"))
+        }
+        CcoDirectiveInformationContentEntity => {
+            Some((CcoInformationContentEntity, "a directive information content entity is a kind of information content entity"))
+        }
+        CcoDescriptiveInformationContentEntity => {
+            Some((CcoInformationContentEntity, "a descriptive information content entity is a kind of information content entity"))
+        }
+        CcoGeospatialRegion => Some((
+            BfoImmaterialEntity,
+            "a geospatial region is grounded in immaterial entity, not material entity — it has no mass",
+        )),
+        CcoFacility => Some((CcoArtifact, "a facility is a kind of artifact — draw is-a to Artifact, not straight to Material Entity")),
+        _ => None,
+    }
+}
+
+/// The alignment grammar: the common core's and the upper ontology's own hierarchy, and the
+/// one seam where a domain type reaches it — an object type or an interface, classified under
+/// a common-core class.
+fn allowed_alignment(rel: RelationKind, src: ShapeKind, dst: ShapeKind) -> Result<(), &'static str> {
+    if matches!(rel, Association | Link) {
+        return Ok(());
+    }
+    if rel != SubsumedBy {
+        return Err("alignment classifies an object type or interface against the common core and the upper ontology with subsumed-by — connect one of those, not a business or application element directly");
+    }
+    let aligned = |l: Layer| matches!(l, Layer::CommonCore | Layer::UpperOntology);
+    match (src.layer(), dst.layer()) {
+        (sl, dl) if aligned(sl) && aligned(dl) => match upper_parent(src) {
+            Some((p, _)) if p == dst => Ok(()),
+            Some((_, reason)) => Err(reason),
+            None => Err("entity is the root of the upper ontology, and is subsumed by nothing"),
+        },
+        (Layer::Ontology, Layer::CommonCore) if matches!(src, ObjectType | Interface) => Ok(()),
+        (Layer::Ontology, Layer::CommonCore) => {
+            Err("only an object type or an interface is classified under the common core — a link type, an action type or a datasource is not a domain class")
+        }
+        (Layer::Ontology, Layer::UpperOntology) => Err(
+            "an object type is grounded through the common core, not straight to the upper ontology — subsume it to a common core class; the common core is already grounded in BFO",
+        ),
+        _ => Err("subsumed-by joins two common-core or upper-ontology classes, or an object type / interface to the common-core class it belongs to"),
+    }
+}
+
 /// The kinds a relation may take from `src` to `dst`, best first.
 ///
 /// "Best" is the picker order in [`RelationKind::ALL`], which puts the specific relations
@@ -2198,10 +2548,13 @@ pub enum View {
     Implementation,
     /// The ontology layer, with the business it twins and the applications that read it.
     Ontology,
+    /// The common core and the upper ontology, with the object types and interfaces they
+    /// ground — how two domain ontologies merge into one Foundry model.
+    Alignment,
 }
 
 impl View {
-    pub const ALL: [View; 9] = [
+    pub const ALL: [View; 10] = [
         View::Freeform,
         View::Free,
         View::Layered,
@@ -2211,6 +2564,7 @@ impl View {
         View::Technology,
         View::Implementation,
         View::Ontology,
+        View::Alignment,
     ];
 
     pub fn name(self) -> &'static str {
@@ -2224,6 +2578,7 @@ impl View {
             View::Technology => "technology",
             View::Implementation => "implementation",
             View::Ontology => "ontology",
+            View::Alignment => "alignment",
         }
     }
 
@@ -2247,6 +2602,7 @@ impl View {
             View::Technology => "nodes, networks and software, and the components they realize",
             View::Implementation => "work packages, plateaus and gaps against the architecture they change",
             View::Ontology => "object types, links, interfaces and actions, with the business they twin and the apps that read them",
+            View::Alignment => "the common core and the upper ontology, and the object types and interfaces grounded in them",
         }
     }
 
@@ -2270,6 +2626,7 @@ impl View {
                 Layer::Sketch,
             ],
             View::Ontology => &[Layer::Ontology, Layer::Business, Layer::Application, Layer::Composite, Layer::Sketch],
+            View::Alignment => &[Layer::Ontology, Layer::CommonCore, Layer::UpperOntology, Layer::Composite, Layer::Sketch],
         }
     }
 
@@ -2346,6 +2703,12 @@ pub static RULES: &[&str] = &[
      — creates one, modifies another, links a third — and has parameters of its own. Draw it \
      as its own shape and join it by its verbs; an arrow labelled 'update' between two object \
      types hides both the parameters and the other types it edits.",
+    "GROUND THROUGH THE COMMON CORE, NOT STRAIGHT TO THE TOP. An object type is subsumed by a \
+     common-core class, never straight by a BFO class — the common core is the seam, grounded \
+     in BFO already, the way a process never touches a component straight, only through a \
+     service. Two object types from different sources that both subsume to the same \
+     common-core class are the proof that they can be joined — that is what interoperability \
+     looks like as a diagram, not a coincidence of naming two things alike.",
 ];
 
 #[cfg(test)]

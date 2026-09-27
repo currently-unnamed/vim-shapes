@@ -16,6 +16,31 @@ pub struct Config {
     /// `lines` or `braille`: how the diagram is drawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ink: Option<String>,
+    /// Every architecture workbench folder ever opened, most-recently-accessed first — a
+    /// person may keep a personal one and a team one, so this is a list, not a single "the"
+    /// workbench.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workbenches: Vec<String>,
+}
+
+/// How many recent workbenches the config remembers — enough to keep a personal one and a
+/// few team ones in reach without the list becoming its own thing to manage.
+const MAX_WORKBENCHES: usize = 10;
+
+impl Config {
+    /// Move `path` to the front of the remembered workbenches — de-duplicated, and capped so
+    /// the list stays a "recent" one rather than growing forever.
+    fn touch_workbench(&mut self, path: String) {
+        self.workbenches.retain(|p| p != &path);
+        self.workbenches.insert(0, path);
+        self.workbenches.truncate(MAX_WORKBENCHES);
+    }
+}
+
+/// Record a workbench as just opened — read-modify-write, like every other config change.
+pub fn touch_workbench(path: &std::path::Path) -> Result<(), String> {
+    let path = path.to_string_lossy().to_string();
+    save(move |c| c.touch_workbench(path))
 }
 
 /// Where the file lives, from the environment; `None` when there is no home to put it in.
@@ -66,5 +91,20 @@ mod tests {
         save_to(&p, |c| c.theme = None).unwrap();
         assert_eq!(load_from(&p), Config::default(), "cleared, and the file still parses");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn touching_a_workbench_moves_it_to_the_front_deduplicated_and_capped() {
+        let mut c = Config::default();
+        c.touch_workbench("/a".into());
+        c.touch_workbench("/b".into());
+        c.touch_workbench("/c".into());
+        assert_eq!(c.workbenches, vec!["/c", "/b", "/a"]);
+        c.touch_workbench("/a".into());
+        assert_eq!(c.workbenches, vec!["/a", "/c", "/b"], "re-touching moves it to the front instead of duplicating");
+        for i in 0..MAX_WORKBENCHES + 5 {
+            c.touch_workbench(format!("/many/{i}"));
+        }
+        assert_eq!(c.workbenches.len(), MAX_WORKBENCHES, "the list stays a \"recent\" one");
     }
 }

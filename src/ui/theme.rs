@@ -148,8 +148,8 @@ pub struct Theme {
     /// The ten named paints, in `Paint::ALL` order.
     pub paints: [[u8; 3]; 10],
     /// The layers, in `Layer` order: motivation, strategy, business, application, technology,
-    /// implementation, composite, sketch.
-    pub layers: [Color; 9],
+    /// implementation, ontology, common core, upper ontology, composite, sketch.
+    pub layers: [Color; 11],
 }
 
 pub const DARK: Theme = Theme {
@@ -179,6 +179,8 @@ pub const DARK: Theme = Theme {
         Color::Rgb(142, 192, 124),
         Color::Rgb(251, 73, 52),
         Color::Rgb(69, 133, 136),
+        Color::Rgb(100, 149, 132),
+        Color::Rgb(180, 180, 180),
         Color::Rgb(146, 131, 116),
         Color::Rgb(168, 153, 132),
     ],
@@ -211,6 +213,8 @@ pub const LIGHT: Theme = Theme {
         Color::Rgb(121, 116, 14),
         Color::Rgb(204, 36, 29),
         Color::Rgb(7, 102, 120),
+        Color::Rgb(45, 140, 120),
+        Color::Rgb(90, 90, 90),
         Color::Rgb(124, 111, 100),
         Color::Rgb(102, 92, 84),
     ],
@@ -277,8 +281,10 @@ fn layer_index(l: Layer) -> usize {
         Layer::Technology => 4,
         Layer::Implementation => 5,
         Layer::Ontology => 6,
-        Layer::Composite => 7,
-        Layer::Sketch => 8,
+        Layer::CommonCore => 7,
+        Layer::UpperOntology => 8,
+        Layer::Composite => 9,
+        Layer::Sketch => 10,
     }
 }
 
@@ -332,7 +338,7 @@ mod tests {
         for i in 0..10 {
             assert_ne!(DARK.paints[i], LIGHT.paints[i], "paint {i} has a value per mode");
         }
-        for i in 0..9 {
+        for i in 0..11 {
             assert_ne!(DARK.layers[i], LIGHT.layers[i], "layer {i} has a value per mode");
         }
     }

@@ -1186,6 +1186,31 @@ impl Element {
         ((h.0 - p.0).powi(2) + ((h.1 - p.1) * 2.0).powi(2) <= tol.powi(2)).then_some(i)
     }
 
+    /// The eight points a hover arrow draws and is clicked at — one per handle, pushed
+    /// `gap` further out along the same ray from the centre, so hovering a shape can offer
+    /// "add a connected shape this way" without the arrow's own hit-zone overlapping the
+    /// handle's (a handle resizes; an arrow, `gap` further out, opens a new one instead).
+    pub fn arrows(&self, gap: f64) -> [(f64, f64); 8] {
+        let (cx, cy) = self.center();
+        self.handles().map(|(hx, hy)| {
+            let (dx, dy) = (hx - cx, hy - cy);
+            let len = dx.hypot(dy);
+            if len == 0.0 { (hx, hy) } else { (hx + dx / len * gap, hy + dy / len * gap) }
+        })
+    }
+
+    /// The arrow within `tol` cells of a point, if any — `handle_at`'s counterpart for
+    /// `arrows`.
+    pub fn arrow_at(&self, p: (f64, f64), tol: f64, gap: f64) -> Option<usize> {
+        self.arrows(gap)
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (i, (h.0 - p.0).powi(2) + ((h.1 - p.1) * 2.0).powi(2)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .filter(|&(_, d)| d <= tol.powi(2))
+            .map(|(i, _)| i)
+    }
+
     /// The name a status line or picker calls it by: its label, or its kind when unlabelled.
     pub fn display(&self) -> String {
         match self.label.trim().is_empty() {
