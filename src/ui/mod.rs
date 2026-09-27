@@ -3003,13 +3003,50 @@ impl App {
         // (or any other relative path) would otherwise be remembered literally, and a "."
         // means something different every time the app's working directory does.
         let path = path.canonicalize().unwrap_or(path);
+        // Only when this is a genuinely different workbench from the one already active this
+        // session — reopening the same one (the panel toggling with `W`, or a bare
+        // `:workbench`) must never redo the restore below, or every toggle would silently
+        // snap the current tab back to whatever was open at the *last* quit, discarding
+        // whatever had actually been switched to since.
+        let switching = self.workbench_root.as_deref() != Some(path.as_path());
         self.workbench = Some(workbench::State::opened(path.clone()));
         self.registry = Some(crate::registry::build(&path));
         self.workbench_root = Some(path.clone());
-        match crate::config::touch_workbench(&path) {
-            Ok(()) => self.say(format!("workbench: {}", path.display()), Tone::Good),
-            Err(e) => self.say(format!("workbench: {} — not remembered: {e}", path.display()), Tone::Note),
+        let remembered = crate::config::touch_workbench(&path);
+        if switching {
+            self.restore_workbench_session(&path, remembered);
+        } else if let Err(e) = remembered {
+            self.say(format!("workbench: {} — not remembered: {e}", path.display()), Tone::Note);
+        } else {
+            self.say(format!("workbench: {}", path.display()), Tone::Good);
         }
+    }
+
+    /// Reopens whatever diagrams, from this same workbench, were still open the last time
+    /// the app quit — the one and only place this ever happens, and only ever reached from
+    /// `open_workbench`, which is itself always an explicit choice (typing `:workbench`, or
+    /// picking one off the startup dialog) rather than something that could happen on its
+    /// own. The status line says what happened either way, so nothing about it is silent.
+    fn restore_workbench_session(&mut self, path: &Path, remembered: Result<(), String>) {
+        let note = remembered.err().map(|e| format!(" — not remembered: {e}"));
+        let Some(session) = crate::config::workbench_session(path) else {
+            self.say(format!("workbench: {}{}", path.display(), note.unwrap_or_default()), Tone::Good);
+            return;
+        };
+        let n = session.tabs.len();
+        for p in session.tabs {
+            self.workbench_open_diagram(PathBuf::from(p));
+        }
+        if let Some(cur) = session.current
+            && let Some(i) = self.tabs.iter().position(|t| t.source.as_deref() == Some(Path::new(&cur)))
+        {
+            self.switch_tab(i);
+        }
+        // Landing on the restored diagrams directly, panel closed, is the same seamlessness
+        // the workbench already gives picking a single row — the difference here is that
+        // there can be several to land among at once.
+        self.workbench = None;
+        self.say(format!("workbench: {} — restored {n} diagram{}{}", path.display(), if n == 1 { "" } else { "s" }, note.unwrap_or_default()), Tone::Good);
     }
 
     /// `W` and bare `:workbench` both land here — closes the panel if it is already open
@@ -3030,6 +3067,27 @@ impl App {
                 self.workbench = Some(workbench::State::recents(recents));
             }
         }
+    }
+
+    /// Called once, right before the process exits, so the workbench this session was in
+    /// (if any) remembers which of its own diagrams were still open, and which was in
+    /// front — for `restore_workbench_session` to offer back the next time this same
+    /// workbench is opened. A no-op with no workbench open this session; quitting with
+    /// nothing from it open still overwrites an earlier, non-empty session with an empty
+    /// one, since that is honestly what was open at this quit.
+    pub fn persist_workbench_session(&self) {
+        let Some(root) = &self.workbench_root else { return };
+        let mut tabs: Vec<String> = Vec::new();
+        for t in &self.tabs {
+            if let Some(p) = &t.source {
+                let s = p.to_string_lossy().to_string();
+                if !tabs.contains(&s) {
+                    tabs.push(s);
+                }
+            }
+        }
+        let current = self.tabs[self.tab].source.as_ref().map(|p| p.to_string_lossy().to_string());
+        let _ = crate::config::save_workbench_session(root, tabs, current);
     }
 
     /// Re-reads the workbench's own folder tree and recompiles `self.registry` from it —
@@ -5511,6 +5569,71 @@ mod tests {
         assert!(a.doc.elements.iter().any(|e| e.display() == "Asset Location" && e.kind == ShapeKind::ObjectType));
         assert_eq!(a.doc.relations.len(), 1);
         assert_eq!(a.doc.relations[0].kind, RelationKind::LinkType);
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn quitting_with_two_workbench_diagrams_open_restores_both_and_the_current_one_next_time_but_never_on_a_mere_reopen() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-restore-config-{}", std::process::id()));
+        let _config_home = isolated_config_home(&config_dir);
+        let root = std::env::temp_dir().join(format!("vim-shapes-restore-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut a_doc = crate::model::Document::default();
+        a_doc.add(ShapeKind::ObjectType, "Order", 0.0, 0.0);
+        persistence::save(&Workspace::single("Order".into(), a_doc), &root.join("a.json")).unwrap();
+        let mut b_doc = crate::model::Document::default();
+        b_doc.add(ShapeKind::ObjectType, "Customer", 0.0, 0.0);
+        persistence::save(&Workspace::single("Customer".into(), b_doc), &root.join("b.json")).unwrap();
+
+        let open_row = |a: &mut App, name: &str| {
+            let i = a.workbench.as_ref().unwrap().display_rows(a.registry.as_ref()).iter().position(|r| matches!(r, workbench::DisplayRow::Fs(row) if row.name == name)).unwrap();
+            a.workbench.as_mut().unwrap().sel = i;
+            key(a, KeyCode::Enter);
+        };
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        open_row(&mut a, "a.json");
+        assert!(a.workbench.is_none(), "opening from the workbench closes the panel");
+        // Reopening the panel for the *same* workbench must not touch tabs — nothing to
+        // restore is recorded yet, and this is also the "mere reopen" case the toggle path
+        // must never confuse with picking a different workbench.
+        a.toggle_workbench();
+        assert!(a.workbench.is_some());
+        open_row(&mut a, "b.json");
+        assert_eq!(a.tabs.len(), 2, "both diagrams open, the second alongside the first rather than replacing it");
+        a.switch_tab(0); // stand on a.json — the one that should come back in front
+
+        let canonical = root.canonicalize().unwrap();
+        a.persist_workbench_session();
+        let session = crate::config::workbench_session(&canonical).expect("something was open at quit");
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.current.as_deref(), Some(canonical.join("a.json").to_string_lossy().as_ref()));
+
+        // A fresh process, later: opening this same workbench for the first time this
+        // session restores both diagrams and lands back on the one that was in front —
+        // explicit (this *is* the `:workbench` command), with the status line saying so.
+        let mut b = app();
+        b.run_excmd(format!("workbench {}", root.display()));
+        assert_eq!(b.tabs.len(), 2, "the session's own blank starting tab was replaced by the first restored one");
+        assert!(b.workbench.is_none(), "landing directly on the diagrams, same as picking one row does");
+        assert_eq!(b.tab_name(), "a");
+        assert!(matches!(&b.status, Some((msg, _)) if msg.contains("restored 2 diagram")));
+
+        // Reopening the panel for this *same* workbench a second time — `W`, or a bare
+        // `:workbench` — must not redo the restore: it would otherwise silently snap the
+        // current tab back to "a" even after switching to "b" in the meantime.
+        b.switch_tab(1);
+        b.toggle_workbench();
+        assert!(b.workbench.is_some());
+        b.toggle_workbench();
+        assert!(b.workbench.is_none());
+        assert_eq!(b.tabs.len(), 2, "no duplicate tabs from re-restoring");
+        assert_eq!(b.tab_name(), "b", "standing on \"b\" survived the panel toggling, unlike a real restore would");
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&config_dir).ok();

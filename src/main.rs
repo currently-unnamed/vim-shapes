@@ -157,6 +157,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
             _ => {}
         }
         if app.should_quit {
+            app.persist_workbench_session();
             return Ok(());
         }
     }

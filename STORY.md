@@ -12,4 +12,4 @@ Lastly, as advancements in LLMs continue to unfold like the bullish early days o
 
 Freeform is no-rules diagramming. Architecture _leans_ (not 100% adoption) on the TOGAF and Archimate models and will raise issues when it doesn't pass validation. In addition to this, vim-shapes includes the ability to visually model ontologies. It includes references to BFO/CCO as well as an ontology engineering practice becoming widely popular in Palantir's Foundry. With an export from Ontology Manager, you can link you object types to business processes and stakeholder maps. Finally, you can understand your application portfolio alongside the enterprise ontological commitments.
 
-I hope you enjoy vim-shapes. While it doesn't leave the mouse out entirely--there are a large array of mouse supported interactions in the TUI--it flipped the priorities for diagramming tools and focused on keyboard-first.
+I hope you enjoy vim-shapes. While it doesn't leave the mouse out entirely--there are a large array of mouse supported interactions in the TUI--it flipped the priorities for diagramming tools and focused on keyboard-first. And yes, you can use the arrow keys.

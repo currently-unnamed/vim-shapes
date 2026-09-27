@@ -892,6 +892,16 @@ fn build_pages() -> Vec<Page> {
              alias, and the |intro| start dialog offers that same remembered list as its own\n\
              third choice, for opening straight into one without a diagram in the way first.\n\
              \n\
+             Whichever of that folder's own diagrams are still open as tabs when the app\n\
+             quits comes back the next time this same folder is opened this way — by\n\
+             :workbench, W, or the start dialog's own remembered list — landing back on\n\
+             whichever tab was in front, the status line saying how many came back. That\n\
+             restore happens exactly once: opening the workbench you are already in this\n\
+             session (the toggle above) never repeats it, so switching tabs after does not\n\
+             get quietly undone by pressing W again. Quitting with the folder's diagrams all\n\
+             closed is remembered too, the same as quitting with some open — there is nothing\n\
+             to come back to next time, on purpose.\n\
+             \n\
              One row is one workspace file — this app's own format, exactly what :w writes —\n\
              so a row can hold a whole family of related diagrams, not just one. Picking one\n\
              adds every tab in it to what is already open, landing on whichever was current\n\
