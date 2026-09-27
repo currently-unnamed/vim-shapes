@@ -1,9 +1,10 @@
 //! The app's own preferences — the first and only one being the theme.
 //!
 //! A diagram's file holds the diagram; a preference is the reader's, so it lives with the
-//! reader: `$XDG_CONFIG_HOME/vim-shapes/config.json`, or `~/.config/vim-shapes/config.json`.
-//! JSON, one object, so it can be read and written by hand as the diagram files can. Missing
-//! or unreadable, it is as if it said nothing.
+//! reader: `$XDG_CONFIG_HOME/vim-shapes/config.json`, or `~/.config/vim-shapes/config.json`, or
+//! — on Windows, where neither of those is set by a stock PowerShell or cmd —
+//! `%APPDATA%\vim-shapes\config.json`. JSON, one object, so it can be read and written by hand
+//! as the diagram files can. Missing or unreadable, it is as if it said nothing.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -90,11 +91,22 @@ pub fn workbench_session(root: &std::path::Path) -> Option<WorkbenchSession> {
 
 /// Where the file lives, from the environment; `None` when there is no home to put it in.
 pub fn path() -> Option<PathBuf> {
-    let dir = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
-    };
-    Some(dir.join("vim-shapes").join("config.json"))
+    resolve_path(std::env::var_os("XDG_CONFIG_HOME"), std::env::var_os("HOME"), std::env::var_os("APPDATA"))
+}
+
+/// [`path`]'s precedence, taken as arguments so it can be tested without touching the real
+/// environment — the three variables it reads are process-global, and tests run in parallel.
+fn resolve_path(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>, appdata: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if let Some(d) = xdg.filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(d).join("vim-shapes").join("config.json"));
+    }
+    if let Some(h) = home.filter(|h| !h.is_empty()) {
+        return Some(PathBuf::from(h).join(".config").join("vim-shapes").join("config.json"));
+    }
+    // Neither is set by a stock PowerShell or cmd; %APPDATA% is Windows' own equivalent, and
+    // Windows apps don't nest under a ".config" folder the way XDG does.
+    let appdata = appdata.filter(|a| !a.is_empty())?;
+    Some(PathBuf::from(appdata).join("vim-shapes").join("config.json"))
 }
 
 pub fn load() -> Config {
@@ -136,6 +148,20 @@ mod tests {
         save_to(&p, |c| c.theme = None).unwrap();
         assert_eq!(load_from(&p), Config::default(), "cleared, and the file still parses");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_path_falls_back_from_xdg_to_home_to_appdata_for_a_home_less_windows_shell() {
+        let some = |s: &str| Some(std::ffi::OsString::from(s));
+        assert_eq!(resolve_path(some("/x"), some("/h"), some("/a")), Some(PathBuf::from("/x/vim-shapes/config.json")), "XDG_CONFIG_HOME wins when set");
+        assert_eq!(resolve_path(None, some("/h"), some("/a")), Some(PathBuf::from("/h/.config/vim-shapes/config.json")), "HOME next");
+        assert_eq!(
+            resolve_path(None, None, some(r"C:\Users\a\AppData\Roaming")),
+            Some(PathBuf::from(r"C:\Users\a\AppData\Roaming").join("vim-shapes").join("config.json")),
+            "a stock PowerShell or cmd sets neither XDG_CONFIG_HOME nor HOME, so %APPDATA% is what's left"
+        );
+        assert_eq!(resolve_path(None, None, None), None, "nowhere to put it");
+        assert_eq!(resolve_path(some(""), some(""), some("")), None, "set-but-empty is the same as unset");
     }
 
     #[test]
