@@ -15,7 +15,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::model::Workspace;
+use crate::model::{Document, Workspace};
 use crate::persistence;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -83,10 +83,13 @@ pub fn new_folder(parent: &Path, name: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// A fresh, empty workspace — the same one `:new` starts — written as `{name}.json`.
+/// A fresh, empty workspace — the same one `:new` starts — written as `{name}.json`, its one
+/// tab named after the file rather than `Workspace::new()`'s own generic "diagram 1": opening
+/// it from the workbench later finds it again by that name instead of piling up a duplicate.
 pub fn new_diagram(parent: &Path, name: &str) -> io::Result<PathBuf> {
-    let path = parent.join(format!("{}.json", sanitize(name)));
-    persistence::save(&Workspace::new(), &path)?;
+    let stem = sanitize(name);
+    let path = parent.join(format!("{stem}.json"));
+    persistence::save(&Workspace::single(stem, Document::default()), &path)?;
     Ok(path)
 }
 
@@ -181,6 +184,7 @@ mod tests {
         assert_eq!(path, root.join("Checkout Flow.json"));
         let ws = persistence::load(&path).unwrap();
         assert_eq!(ws.tabs.len(), 1, "the same fresh workspace :new starts");
+        assert_eq!(ws.tabs[0].name, "Checkout Flow", "named after the file, not the generic \"diagram 1\" — so reopening it finds it by name");
         fs::remove_dir_all(&root).ok();
     }
 

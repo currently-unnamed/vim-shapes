@@ -650,6 +650,18 @@ pub fn paint(scene: &Scene, area: Rect, buf: &mut Buffer) {
             let p = cell(h);
             g.fixed(p.0, p.1, ch, c);
         }
+        // A plain hover, not a reshape in hand: an arrow just outside each handle too,
+        // faint — click one to add a new connected shape that way, the mouse's own `o`.
+        // The line-art counterpart to `canvas.rs`'s braille `Mark::Arrow`: same positions
+        // (`Element::arrows`), a fixed glyph instead of a drawn one.
+        if on.is_none() {
+            const GLYPH: [char; 8] = ['↖', '▲', '↗', '▶', '↘', '▼', '↙', '◀'];
+            let faint = theme::fade(theme::t().aqua, 45, theme::t().ground);
+            for (i, a) in e.arrows(super::ARROW_GAP).into_iter().enumerate() {
+                let p = cell(a);
+                g.fixed(p.0, p.1, GLYPH[i], faint);
+            }
+        }
     }
 
     for y in 0..g.height {

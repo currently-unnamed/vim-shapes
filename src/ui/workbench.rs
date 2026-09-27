@@ -20,11 +20,6 @@ use ratatui::widgets::Paragraph;
 
 pub const WIDTH: u16 = 40;
 
-/// How tall the panel wants to be when it floats, same clamp `tree::height` uses.
-pub fn height(avail: u16) -> u16 {
-    avail.saturating_sub(2).clamp(8, 40)
-}
-
 /// What is being typed: a new diagram's or folder's name, going in wherever the cursor is, or
 /// the selected row's own new name.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

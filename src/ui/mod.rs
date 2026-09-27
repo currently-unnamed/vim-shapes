@@ -10,6 +10,7 @@ pub mod canvas;
 pub mod chrome;
 pub mod cmdline;
 pub mod colour;
+pub mod ctxmenu;
 pub mod debug;
 pub mod excmd;
 pub mod expandpick;
@@ -274,6 +275,8 @@ pub struct App {
     importdlg: Option<importdlg::State>,
     /// `e` (expand) — up while its list is showing.
     expandpick: Option<expandpick::State>,
+    /// The right-click menu — up from an idle right-click until a row runs, or esc.
+    ctxmenu: Option<ctxmenu::State>,
     confirm: Option<Confirm>,
     status: Option<(String, Tone)>,
     /// World coordinates of the top-left cell of the view.
@@ -383,6 +386,7 @@ impl App {
             export: None,
             importdlg: None,
             expandpick: None,
+            ctxmenu: None,
             confirm: None,
             status: None,
             camera: (0.0, 0.0),
@@ -1917,6 +1921,10 @@ impl App {
                         self.say(e, Tone::Bad);
                     }
                 }
+                start::Outcome::Workbench(path) => {
+                    self.start = None;
+                    self.open_workbench(path);
+                }
             }
             return;
         }
@@ -1957,6 +1965,14 @@ impl App {
                         }
                     }
                 }
+            }
+            return;
+        }
+        if let Some(st) = &mut self.ctxmenu {
+            match st.key(k) {
+                ctxmenu::Outcome::Nothing => {}
+                ctxmenu::Outcome::Cancel => self.ctxmenu = None,
+                ctxmenu::Outcome::Run(cmd) => self.run_cmd(cmd, Avail::Yes),
             }
             return;
         }
@@ -2425,6 +2441,7 @@ impl App {
             && self.export.is_none()
             && self.importdlg.is_none()
             && self.expandpick.is_none()
+            && self.ctxmenu.is_none()
             && self.cmdline.is_none()
             && self.confirm.is_none()
             && self.insert.is_none()
@@ -2458,7 +2475,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Right) => self.mouse_right_down(p, (m.column, m.row)),
             MouseEventKind::Drag(MouseButton::Right) => self.mouse_right_drag(p, (m.column, m.row)),
             MouseEventKind::Up(MouseButton::Right) => self.mouse_right_up(p),
-            MouseEventKind::Moved => self.hover = self.doc.element_at(p),
+            MouseEventKind::Moved => self.hover = self.doc.element_near(p, ARROW_HIT, ARROW_GAP),
             MouseEventKind::ScrollUp => self.pan(0.0, -PAN_Y),
             MouseEventKind::ScrollDown => self.pan(0.0, PAN_Y),
             MouseEventKind::ScrollLeft => self.pan(-PAN_X, 0.0),
@@ -2633,9 +2650,11 @@ impl App {
     /// hold/carry/drop verb (`drop_relation`) — the mouse just compresses it into one
     /// gesture. A right-drag that panned the view lets go having only done that — a pan is a
     /// deliberate move, not a cancel, and undoing the current pick or hold as a side effect
-    /// of it would be a surprise. Anything else — a plain right-click, or a drag that never
-    /// found an element to hold or ground to pan — cancels whatever is active instead: a
-    /// held or moving reshape, then a held relation, then a non-empty pick.
+    /// of it would be a surprise. A right-click mid another gesture — a held or moving
+    /// reshape, a held relation — cancels that instead, the same as esc. Otherwise (an idle
+    /// right-click, nothing above it to bail out of) it opens the context menu: whatever is
+    /// selected stays selected, since acting on the current pick is often the whole point of
+    /// asking for a menu — esc is still how to clear a selection outright.
     fn mouse_right_up(&mut self, _p: (f64, f64)) {
         let panned = self.mouse_dragging && self.pan_from.is_some();
         let attempted = self.mouse_dragging && self.holding.is_some();
@@ -2653,9 +2672,11 @@ impl App {
             self.reshape = None;
         } else if self.holding.is_some() {
             self.holding = None;
-        } else if self.visual || !self.selection.is_empty() {
-            self.visual = false;
-            self.selection.clear();
+        } else if !self.mouse_dragging {
+            if let Some(id) = self.connect_from {
+                self.set_cursor(id);
+            }
+            self.ctxmenu = Some(ctxmenu::State::new(&self.whereami()));
         }
         self.connect_from = None;
         self.pan_from = None;
@@ -2829,10 +2850,26 @@ impl App {
     /// same as `tabnew_from_path`, so unlike `:open` this never needs to ask about unsaved
     /// work first.
     fn workbench_open_diagram(&mut self, path: PathBuf) {
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
         match persistence::load(&path) {
             Ok(ws) => {
+                // A single-tab file is named after the file itself here, not whatever name
+                // it happens to carry inside — `new_diagram` already writes that name, but an
+                // externally authored file might not. Either way, this is the name a second
+                // Enter on the same row looks for, so opening it twice switches to the one
+                // tab already open instead of piling up an empty duplicate — the bug a bare
+                // "already open" name check on the file's own internal name would still miss
+                // for anything written before this was true.
+                let single = ws.tabs.len() == 1;
+                let first_name = if single { stem.clone() } else { ws.tabs[0].name.clone() };
+                if let Some(i) = self.tabs.iter().position(|t| t.name == first_name) {
+                    self.switch_tab(i);
+                    self.say(format!("{first_name} — already open"), Tone::Note);
+                    return;
+                }
                 let first_new = self.tabs.len();
                 for Tab { name, diagram } in ws.tabs {
+                    let name = if single { stem.clone() } else { name };
                     self.tabs.push(TabSlot { name, doc: diagram, ..Default::default() });
                 }
                 self.switch_tab(first_new);
@@ -3474,14 +3511,17 @@ impl App {
         }
     }
 
-    /// Run a command from the menu by replaying its keystrokes into the dispatcher, so there
-    /// stays exactly one path through which anything happens.
+    /// Run a command from a menu by replaying its keystrokes into the dispatcher, so there
+    /// stays exactly one path through which anything happens. Whichever menu called this —
+    /// `?`'s or the right-click one — closes first: a replayed keystroke must reach the
+    /// diagram, not loop back into the menu that is still sitting on top of it.
     fn run_cmd(&mut self, cmd: &'static keymap::Cmd, avail: Avail) {
         match avail {
             Avail::No(why) => self.say(why, Tone::Bad),
             Avail::Yes if !cmd.runnable() => self.say(format!("{} — press it in the diagram", cmd.keys), Tone::Note),
             Avail::Yes => {
                 self.help = None;
+                self.ctxmenu = None;
                 for s in cmd.run {
                     self.on_key(s.event());
                 }
@@ -4090,12 +4130,13 @@ impl App {
             return;
         }
         let [top, full0, foot] = Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
-        // The workbench docks on the left when there is room left over for the right-hand
-        // dock's own, unmodified `DOCK_MIN` check below — so a very narrow terminal keeps the
-        // sheet/layers/props logic exactly as it was, and only the workbench gives way to a
-        // float instead.
-        let left_docked = self.workbench.is_some() && full0.width >= workbench::WIDTH + sheet::DOCK_MIN;
-        let full = if left_docked { Rect { x: full0.x + workbench::WIDTH, width: full0.width - workbench::WIDTH, ..full0 } } else { full0 };
+        // Unlike the right-hand sheet/layers/props dock, the workbench never floats — it is a
+        // folder you are working against, not a momentary editor, so it always holds its own
+        // column on the left. Clamped rather than gated on a minimum width: a terminal too
+        // narrow for the full column still gets whatever is left, same as `chrome::centered`
+        // clamps everywhere else, rather than the panel vanishing into a float.
+        let left_width = if self.workbench.is_some() { workbench::WIDTH.min(full0.width) } else { 0 };
+        let full = Rect { x: full0.x + left_width, width: full0.width - left_width, ..full0 };
         // The sheet follows the cursor: point it at whatever is under the cursor now.
         let target = self.sheet_target();
         if let Some(sh) = &mut self.sheet
@@ -4157,11 +4198,7 @@ impl App {
             f.render_widget(tree::Browser { state: st, nodes: &self.model_tree }, area);
         }
         if let Some(st) = &self.workbench {
-            let area = if left_docked {
-                Rect { x: full0.x, y: full.y, width: workbench::WIDTH, height: full.height }
-            } else {
-                chrome::centered(body, workbench::WIDTH.max(48), workbench::height(body.height))
-            };
+            let area = Rect { x: full0.x, y: full.y, width: left_width, height: full.height };
             f.render_widget(workbench::Browser { state: st }, area);
         }
         let layers_h = self.layers.as_ref().map_or(0, |_| (self.doc.layers.len() as u16 + 6).min(full.height));
@@ -4212,6 +4249,10 @@ impl App {
         if let Some(d) = &self.expandpick {
             let area = chrome::centered(body, expandpick::WIDTH, expandpick::height(d.rows.len()));
             f.render_widget(expandpick::Dialog { state: d }, area);
+        }
+        if let Some(d) = &self.ctxmenu {
+            let area = chrome::centered(body, ctxmenu::WIDTH, ctxmenu::height(d.rows.len()));
+            f.render_widget(ctxmenu::Dialog { state: d }, area);
         }
         if self.debug {
             let rows = self.debug_rows();
@@ -4285,6 +4326,7 @@ impl App {
             (self.export.is_some(), "export"),
             (self.importdlg.is_some(), "importdlg"),
             (self.expandpick.is_some(), "expandpick"),
+            (self.ctxmenu.is_some(), "ctxmenu"),
             (self.tabpick.is_some(), "tabpick"),
             (self.start.is_some(), "start"),
             (self.confirm.is_some(), "confirm"),
@@ -4505,6 +4547,30 @@ mod tests {
         key(&mut a, KeyCode::Esc);
         assert!(a.start.is_none(), "esc goes on with an unnamed diagram");
         assert!(a.path.is_none());
+    }
+
+    #[test]
+    fn the_start_dialog_offers_a_remembered_workbench_and_opens_it() {
+        // Confirming writes back through `config::touch_workbench` — isolate it from the
+        // real config file the same way the theme test isolates `XDG_CONFIG_HOME`.
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-start-workbench-config-{}", std::process::id()));
+        // SAFETY: this test alone touches the variable, and only reads it back through the
+        // config module.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let mut a = App::new();
+        press(&mut a, ":");
+        assert!(a.start.is_some());
+        let root = std::env::temp_dir().join(format!("vim-shapes-start-workbench-{}", std::process::id()));
+        a.start.as_mut().unwrap().workbenches = vec![root.clone()];
+        key(&mut a, KeyCode::Char('w'));
+        assert_eq!(a.start.as_ref().unwrap().choice, start::Choice::Workbench);
+        key(&mut a, KeyCode::Enter); // side: left → right
+        key(&mut a, KeyCode::Enter); // confirms the one remembered workbench
+        assert!(a.start.is_none(), "picking a workbench closes the dialog, like any other choice");
+        assert!(a.workbench.is_some(), "and opens it");
+        assert_eq!(a.workbench.as_ref().unwrap().root, Some(root.clone()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
     }
 
     #[test]
@@ -4993,6 +5059,46 @@ mod tests {
         a.cursor = Some(order_id);
         key(&mut a, KeyCode::Char('e'));
         assert!(a.expandpick.is_none(), "nothing left to expand — the key is refused, not opened empty");
+    }
+
+    #[test]
+    fn the_workbench_always_docks_left_and_opening_the_same_diagram_twice_switches_instead_of_duplicating() {
+        let root = std::env::temp_dir().join(format!("vim-shapes-workbench-key-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        assert!(a.workbench.is_some());
+
+        // A new diagram, named after what was typed — the same name a second Enter on the
+        // row has to find again.
+        key(&mut a, KeyCode::Char('n'));
+        press(&mut a, "Checkout Flow");
+        key(&mut a, KeyCode::Enter);
+        assert!(root.join("Checkout Flow.json").exists());
+
+        let row_i = a.workbench.as_ref().unwrap().rows().iter().position(|r| r.name == "Checkout Flow.json").unwrap();
+        a.workbench.as_mut().unwrap().sel = row_i;
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.tabs.len(), 2, "the fresh diagram opened as a new tab");
+        assert_eq!(a.tab_name(), "Checkout Flow");
+        assert!(a.workbench.is_some(), "the panel stays open — browsing continues");
+
+        // Back to the workbench, and Enter on the same row again.
+        let row_i = a.workbench.as_ref().unwrap().rows().iter().position(|r| r.name == "Checkout Flow.json").unwrap();
+        a.workbench.as_mut().unwrap().sel = row_i;
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.tabs.len(), 2, "still two — the second Enter switched to the tab already open, not a third");
+        assert_eq!(a.tab_name(), "Checkout Flow");
+
+        // The panel always reserves its own column — never a floating dialog — regardless
+        // of terminal width, unlike the sheet's own right-hand dock.
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        assert_eq!(a.body.x, workbench::WIDTH, "the diagram body starts after the workbench's own column");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -5934,6 +6040,36 @@ mod tests {
     }
 
     #[test]
+    fn hovering_reaches_into_the_gutter_and_clicking_the_arrow_opens_off_that_port() {
+        let mut a = app();
+        // Small and close to the origin — `App::new`'s default body is 80×22 cells, and a
+        // point off the edge of it is `screen_to_world`'s "outside the diagram" already,
+        // before the arrow geometry is even asked about.
+        let x = a.doc.add(ApplicationComponent, "CRM", 10.0, 8.0);
+        // A box whose right handle's own row is a whole number: `handle_at`'s distance
+        // weights a row twice a column (cells read taller than wide), so a handle exactly
+        // between two rows would need the click to land within half of half a row of it —
+        // tighter than a mouse's own cell resolution ever lands.
+        a.doc.element_mut(x).unwrap().h = 6.0;
+        a.set_cursor(x);
+        let right_arrow = a.doc.element(x).unwrap().arrows(ARROW_GAP)[3];
+        let at = (right_arrow.0.round(), right_arrow.1.round());
+        // A point just inside the box first sets hover the ordinary way...
+        let e = a.doc.element(x).unwrap().clone();
+        mouse(&mut a, MouseEventKind::Moved, (e.x + 1.0, e.y + 1.0));
+        assert_eq!(a.hover, Some(x));
+        // ...and a point out in the gutter, past the border, keeps it: an arrow drawn
+        // outside its shape would otherwise go cold the instant the mouse crosses the edge
+        // on the way to it.
+        mouse(&mut a, MouseEventKind::Moved, at);
+        assert_eq!(a.hover, Some(x), "hover reaches into the arrow's own gutter");
+        assert!(!e.contains((at.0, at.1)), "the arrow point really is outside the box");
+        click(&mut a, MouseButton::Left, at);
+        assert!(matches!(a.palette.as_ref().map(|p| p.purpose), Some(palette::Purpose::Relate(_))), "the same dialog o opens");
+        assert_eq!(a.pending_port, Some(3), "the right handle — the arrow clicked");
+    }
+
+    #[test]
     fn the_direction_can_change_in_the_dialog_before_the_shape_is_added() {
         let mut a = app();
         let x = a.doc.add(ApplicationComponent, "CRM", 20.0, 20.0);
@@ -6761,14 +6897,36 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_right_click_cancels_instead_of_connecting() {
+    fn a_plain_right_click_opens_the_menu_and_leaves_the_pick_alone() {
         let mut a = app();
         let (x, _y) = two(&mut a);
         a.selection = vec![x];
         a.visual = true;
         click(&mut a, MouseButton::Right, (10.0, 4.0));
         assert!(a.relpick.is_none());
-        assert!(!a.visual && a.selection.is_empty(), "a right-click with no drag cancels the pick");
+        assert!(a.visual && a.selection == vec![x], "an idle right-click opens the menu — acting on the pick is the point, so it stays");
+        assert!(a.ctxmenu.is_some(), "the context menu opened");
+    }
+
+    #[test]
+    fn the_context_menu_runs_a_row_by_replaying_its_keys() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        a.set_cursor(x);
+        click(&mut a, MouseButton::Right, (2.0, 2.0));
+        assert!(a.ctxmenu.is_some(), "an idle right-click on an element opens the menu");
+        let i = a
+            .ctxmenu
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|r| r.cmd.keys == "v")
+            .expect("v is available in normal mode, same as the ? menu's own replay test");
+        a.ctxmenu.as_mut().unwrap().sel = i;
+        key(&mut a, KeyCode::Enter);
+        assert!(a.ctxmenu.is_none(), "running a row closes the menu");
+        assert!(a.visual, "v from the menu did what v does");
     }
 
     #[test]
@@ -6857,6 +7015,38 @@ mod eyeball {
         }
         a.set_cursor(0);
         a.cursor = None;
+        term.draw(|f| a.draw(f)).unwrap();
+        println!("{}", dump(&term));
+    }
+
+    #[test]
+    #[ignore]
+    fn render_the_hover_arrows() {
+        let mut a = App::new();
+        a.loading = false;
+        a.run_excmd("tabnew freeform gallery".into());
+        a.run_excmd("grid off".into());
+        let x = a.doc.add(ShapeKind::Box, "Items", 10.0, 6.0);
+        a.set_cursor(x);
+        a.hover = Some(x);
+        for ink in ["lines", "braille"] {
+            a.run_excmd(format!("ink {ink}"));
+            let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+            term.draw(|f| a.draw(f)).unwrap();
+            println!("-- {ink} --\n{}", dump(&term));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn render_the_right_click_menu() {
+        let mut term = Terminal::new(TestBackend::new(90, 26)).unwrap();
+        let mut a = App::new();
+        a.loading = false;
+        a.run_excmd("tabnew freeform gallery".into());
+        let x = a.doc.add(ShapeKind::Box, "Items", 10.0, 6.0);
+        a.set_cursor(x);
+        a.ctxmenu = Some(ctxmenu::State::new(&a.whereami()));
         term.draw(|f| a.draw(f)).unwrap();
         println!("{}", dump(&term));
     }

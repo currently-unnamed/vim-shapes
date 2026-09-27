@@ -790,6 +790,10 @@ mod tests {
         let a = d.add(ShapeKind::Box, "a", 0.0, 0.0);
         let b = d.add(ShapeKind::Box, "b", 40.0, 20.0);
         let r = d.connect(RelationKind::Link, a, b).unwrap();
+        // Orthogonal is the connect default now, so the straight case has to ask for it.
+        let mut look = d.relation(r).unwrap().notation();
+        look.route = crate::ontology::Route::Straight;
+        d.relation_mut(r).unwrap().style = Some(look);
         let straight = picture(&d, &o);
         let mut look = d.relation(r).unwrap().notation();
         look.route = crate::ontology::Route::Orthogonal;

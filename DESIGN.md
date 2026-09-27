@@ -24,6 +24,7 @@ src/
   main.rs            args, terminal init, the loop, teardown
   model.rs           Document: elements, relations, metadata. What undo clones and the file is.
   persistence.rs     save / load / validate
+  workbench.rs       the architecture workbench's filesystem: scan a folder, new/rename/move/delete
   drawio_export.rs   :export — a draw.io file with the notation mapped
   shapes.rs          outlines as braille primitives; where a relation leaves a box
   layout.rs          :layout — by layer, or by flow
@@ -42,6 +43,7 @@ src/
     palette.rs       :add — a search over kinds, grouped by layer, narrowed by view
     relpick.rs       the relation-kind picker
     manual.rs        :help — prose pages plus generated pages
+    workbench.rs     the architecture workbench panel — docked on the left, live against a folder
     canvas.rs        the diagram: braille outlines and relations, text over the top
     chrome.rs        the app's own look: panel, hint, marker
     theme.rs         the accent palette
@@ -142,7 +144,7 @@ The properties of whatever the cursor is on live in a **sheet docked down the ri
 
 A shape can lean: `<` and `>` shear it sideways a cell at a time, `{` and `}` up and down, on the diagram or from inside it, and `skew x` and `skew y` on the arrange tab set the leans in cells. The shear is applied in `shapes::drawn`, where every surface gets an outline, with the top edge moved half the skew left and the bottom half right (and the left edge half up, the right half down) so the shape's centre stays on its box; the box itself, its handles and its ports do not lean, which keeps a relation attached where it was. The draw.io file gets a parallelogram for a rectangle leaned sideways, flipped for a left lean; a lean up or down, and any other shape's lean, show only in the pictures, since the desktop tool has no shear for them.
 
-A link has a route: straight, orthogonal or curved, decided once in `shapes::route` as the points the line passes through, and every surface draws the notation along those points — legs in the line's style, the ends turned to the first and last legs, node marks and labels placed by length along the route rather than along the chord. Orthogonal leaves along the longer axis as the eye sees it (a cell is twice as tall as wide), and `elbow` says where the first leg turns; the draw.io file gets that turn as a waypoint. End sizes scale the heads in braille and on paper alike.
+A link has a route: straight, orthogonal (every kind's own default — a diagram of boxes reads as engineering when its lines turn in right angles) or curved, decided once in `shapes::route` as the points the line passes through, and every surface draws the notation along those points — legs in the line's style, the ends turned to the first and last legs, node marks and labels placed by length along the route rather than along the chord. Orthogonal leaves along the longer axis as the eye sees it (a cell is twice as tall as wide), and `elbow` says where the first leg turns; the draw.io file gets that turn as a waypoint. End sizes scale the heads in braille and on paper alike.
 
 A picked set stretches: in visual mode the resize keys scale the set's bounding box by a few cells, and every picked shape's place and size scale with it from the box's top-left, which is what dragging a corner of a desktop tool's group selection does. It stops before the box would fold below one shape's own minimum.
 

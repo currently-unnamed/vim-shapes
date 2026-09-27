@@ -33,6 +33,10 @@ pub enum Side {
 pub enum Choice {
     New,
     Open,
+    /// One of the folders `:workbench` has opened before — the title screen's own shortcut
+    /// into a team's (or a person's) library, the same list `:workbench` bare offers once
+    /// you are already in.
+    Workbench,
 }
 
 /// Which part of the new-diagram form has the keyboard.
@@ -56,6 +60,9 @@ pub enum Outcome {
     /// Start a new diagram, to be saved at `path`, of this kind.
     New { path: PathBuf, view: View },
     Open(PathBuf),
+    /// Open this folder as the architecture workbench — an empty diagram besides, the same
+    /// as `Dismiss`, since picking a workbench is not picking a diagram to start on.
+    Workbench(PathBuf),
     /// Esc: go on with an unnamed, empty diagram — vim's own answer to no file.
     Dismiss,
 }
@@ -70,6 +77,11 @@ pub struct State {
     pub dir: PathBuf,
     pub entries: Vec<Entry>,
     pub sel: usize,
+    /// Every folder `:workbench` has opened before, most-recently-accessed first — read once
+    /// from the config, the same list `:workbench` bare offers once you are already in.
+    pub workbenches: Vec<PathBuf>,
+    /// Index into `workbenches`.
+    pub wb_sel: usize,
     pub error: Option<String>,
 }
 
@@ -88,6 +100,8 @@ impl State {
             dir,
             entries: Vec::new(),
             sel: 0,
+            workbenches: crate::config::load().workbenches.into_iter().map(PathBuf::from).collect(),
+            wb_sel: 0,
             error: None,
         };
         s.read_dir();
@@ -176,6 +190,13 @@ impl State {
                 Some(e) if !e.is_dir => None,
                 _ => Some("pick a file to open".into()),
             },
+            Choice::Workbench => {
+                if self.workbenches.is_empty() {
+                    Some("no workbench opened before — pick new or open, then :workbench <path> once you are in".into())
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -187,6 +208,7 @@ impl State {
         match self.choice {
             Choice::New => Outcome::New { path: self.new_path(), view: KINDS[self.kind] },
             Choice::Open => Outcome::Open(self.dir.join(&self.selected().expect("valid").name)),
+            Choice::Workbench => Outcome::Workbench(self.workbenches[self.wb_sel].clone()),
         }
     }
 
@@ -226,7 +248,7 @@ impl State {
                         self.new_focus = NewFocus::Kind;
                         Side::Right
                     }
-                    (Side::Left, Choice::Open, _) => Side::Right,
+                    (Side::Left, Choice::Open | Choice::Workbench, _) => Side::Right,
                 };
                 return Outcome::Nothing;
             }
@@ -234,14 +256,23 @@ impl State {
         }
         match self.side {
             Side::Left => match k.code {
-                KeyCode::Char('j') | KeyCode::Down | KeyCode::Char('k') | KeyCode::Up => {
+                KeyCode::Char('j') | KeyCode::Down => {
                     self.choice = match self.choice {
                         Choice::New => Choice::Open,
+                        Choice::Open => Choice::Workbench,
+                        Choice::Workbench => Choice::New,
+                    };
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.choice = match self.choice {
+                        Choice::New => Choice::Workbench,
                         Choice::Open => Choice::New,
+                        Choice::Workbench => Choice::Open,
                     };
                 }
                 KeyCode::Char('n') => self.choice = Choice::New,
                 KeyCode::Char('o') => self.choice = Choice::Open,
+                KeyCode::Char('w') => self.choice = Choice::Workbench,
                 KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
                     self.side = Side::Right;
                     self.new_focus = NewFocus::Name;
@@ -297,6 +328,20 @@ impl State {
                     KeyCode::Char('G') => self.sel = self.entries.len().saturating_sub(1),
                     _ => {}
                 },
+                (Choice::Workbench, _) => match k.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if !self.workbenches.is_empty() {
+                            self.wb_sel = (self.wb_sel + 1) % self.workbenches.len();
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if !self.workbenches.is_empty() {
+                            self.wb_sel = (self.wb_sel + self.workbenches.len() - 1) % self.workbenches.len();
+                        }
+                    }
+                    KeyCode::Enter => return self.confirm(),
+                    _ => {}
+                },
             },
         }
         Outcome::Nothing
@@ -315,6 +360,7 @@ impl Widget for Dialog<'_> {
             (Side::Left, _) => " j/k choose   tab or enter → the right side   ^enter confirm   esc: an unnamed diagram",
             (Side::Right, Choice::New) => " type the name   tab → the kind   h/l pick   enter or ^enter confirm   esc",
             (Side::Right, Choice::Open) => " j/k pick   enter or l into a folder   h or backspace up   enter on a file opens   esc",
+            (Side::Right, Choice::Workbench) => " j/k pick   enter or ^enter opens it   esc",
         };
         let body = chrome::hint(buf, inner, hint);
         if body.height < 4 || body.width < LEFT_W + 20 {
@@ -343,12 +389,13 @@ impl Widget for Dialog<'_> {
             };
             Line::styled(format!("{}{label:<12}", chrome::marker(on)), style)
         };
-        Paragraph::new(vec![Line::raw(""), row(Choice::New, " new"), row(Choice::Open, " open")]).render(left, buf);
+        Paragraph::new(vec![Line::raw(""), row(Choice::New, " new"), row(Choice::Open, " open"), row(Choice::Workbench, " workbench")]).render(left, buf);
         // A faint divider of spaces is the gap; the halves need no line between them.
 
         match s.choice {
             Choice::New => self.render_new(right, buf),
             Choice::Open => self.render_open(right, buf),
+            Choice::Workbench => self.render_workbench(right, buf),
         }
     }
 }
@@ -432,6 +479,43 @@ impl Dialog<'_> {
                     (_, _, true, _) => Style::new().fg(theme::t().aqua),
                     (_, _, _, true) => Style::new().fg(theme::t().bright),
                     _ => Style::new().fg(theme::t().dim),
+                };
+                Line::styled(fit(&text, list.width as usize), style)
+            })
+            .collect();
+        Paragraph::new(lines).render(list, buf);
+    }
+
+    fn render_workbench(&self, area: Rect, buf: &mut Buffer) {
+        let s = self.state;
+        let on = s.side == Side::Right;
+        if s.workbenches.is_empty() {
+            let msg = "no workbench opened before — new or open, then :workbench <path> once you are in";
+            Paragraph::new(vec![Line::raw(""), Line::styled(msg, Style::new().fg(theme::t().dim))]).render(area, buf);
+            return;
+        }
+        let heading = Line::styled("opened before, most recent first", Style::new().fg(theme::t().dim));
+        let list = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
+        Paragraph::new(vec![Line::raw(""), heading]).render(area, buf);
+        let view = list.height as usize;
+        if view == 0 {
+            return;
+        }
+        let max_off = s.workbenches.len().saturating_sub(view);
+        let off = s.wb_sel.saturating_sub(view / 2).min(max_off);
+        let lines: Vec<Line> = s
+            .workbenches
+            .iter()
+            .enumerate()
+            .skip(off)
+            .take(view)
+            .map(|(i, p)| {
+                let picked = i == s.wb_sel;
+                let text = format!("{}{}", chrome::marker(picked), p.display());
+                let style = match (picked, on) {
+                    (true, true) => Style::new().fg(theme::t().inverse).bg(theme::t().aqua).bold(),
+                    (true, false) => Style::new().fg(theme::t().aqua).bold(),
+                    _ => Style::new().fg(theme::t().bright),
                 };
                 Line::styled(fit(&text, list.width as usize), style)
             })
@@ -523,6 +607,37 @@ mod tests {
         assert_eq!((s.side, s.new_focus), (Side::Right, NewFocus::Kind));
         press(&mut s, KeyCode::Tab);
         assert_eq!(s.side, Side::Left);
+    }
+
+    #[test]
+    fn j_k_cycles_through_all_three_choices_and_wraps() {
+        let mut s = State::new();
+        assert_eq!(s.choice, Choice::New);
+        press(&mut s, KeyCode::Char('j'));
+        assert_eq!(s.choice, Choice::Open);
+        press(&mut s, KeyCode::Char('j'));
+        assert_eq!(s.choice, Choice::Workbench);
+        press(&mut s, KeyCode::Char('j'));
+        assert_eq!(s.choice, Choice::New, "wraps forward");
+        press(&mut s, KeyCode::Char('k'));
+        assert_eq!(s.choice, Choice::Workbench, "and wraps back");
+        press(&mut s, KeyCode::Char('w'));
+        assert_eq!(s.choice, Choice::Workbench, "w picks it directly, like n and o do their own");
+    }
+
+    #[test]
+    fn workbench_with_nothing_remembered_is_refused_and_picking_a_remembered_one_confirms() {
+        let mut s = State::new();
+        s.choice = Choice::Workbench;
+        s.workbenches = Vec::new();
+        assert_eq!(ctrl_enter(&mut s), Outcome::Nothing, "nothing to pick yet");
+        assert!(s.error.as_deref().unwrap().contains("no workbench"), "{:?}", s.error);
+
+        s.workbenches = vec![PathBuf::from("/team/architecture"), PathBuf::from("/me/personal")];
+        s.side = Side::Right;
+        press(&mut s, KeyCode::Char('j'));
+        assert_eq!(s.wb_sel, 1);
+        assert_eq!(press(&mut s, KeyCode::Enter), Outcome::Workbench(PathBuf::from("/me/personal")));
     }
 
     #[test]

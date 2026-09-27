@@ -311,6 +311,7 @@ fn build_pages() -> Vec<Page> {
              |idioms|       worked shapes to start from\n\
              |rules|        the lessons, in words\n\
              |files|        saving, opening, exporting\n\
+             |workbench|    a folder of diagrams, docked on the left, kept in sync with disk\n\
              |render|       the diagram as a picture\n\
              |palette|      the ten colours\n\
              |ontology-kind| the ontology layer: object types, properties, links, actions\n\
@@ -344,12 +345,14 @@ fn build_pages() -> Vec<Page> {
              \n\
              # starting\n\
              \n\
-             Opened with no file, the title screen gives way to a dialog: NEW, or OPEN.\n\
-             tab walks its two halves. New asks a file name and which kind of diagram —\n\
-             freeform or architecture, drawn as pictures, h/l to pick; open walks the\n\
-             working directory like any open dialog, enter into a folder, h up, enter on\n\
-             a file. ^enter confirms from anywhere once everything is valid; esc goes on\n\
-             with an unnamed diagram. vim-shapes <file> skips all of it.\n\
+             Opened with no file, the title screen gives way to a dialog: NEW, OPEN, or\n\
+             WORKBENCH. j/k or n/o/w choose; tab walks into whichever's own half. New asks a\n\
+             file name and which kind of diagram — freeform or architecture, drawn as\n\
+             pictures, h/l to pick; open walks the working directory like any open dialog,\n\
+             enter into a folder, h up, enter on a file; workbench lists every folder\n\
+             |workbench| has opened before, most recent first, j/k to pick one. ^enter\n\
+             confirms from anywhere once everything is valid; esc goes on with an unnamed\n\
+             diagram. vim-shapes <file> skips all of it.\n\
              \n\
              # the first minute\n\
              \n\
@@ -473,16 +476,21 @@ fn build_pages() -> Vec<Page> {
              >                        a relation\n\
              >  click on ground       let go of the pick\n\
              >  drag a body           move it (the whole pick, if it is part of one)\n\
-             >  hover a shape         its eight handles show — the same ones i opens\n\
+             >  hover a shape         its eight handles show, the same ones i opens, and\n\
+             >                        eight faint arrows just outside them\n\
              >  drag an open handle   resize that corner or edge\n\
              >  drag a patched handle move the relation's end to another handle on the\n\
              >                        same shape\n\
+             >  click an arrow        open a new shape that way — the same dialog o and a\n\
+             >                        ctrl-direction chord open, anchored at that handle\n\
              >  right-drag,           the same picker enter/hjkl/enter opens, for a NEW\n\
              >  shape to shape        relation between the two\n\
              >  right-drag from       pan — the view moves exactly as far and the same way\n\
              >  empty ground          as the mouse, like dragging the canvas itself by hand\n\
-             >  right-click           let go of whatever is in hand — a held handle, a\n\
-             >                        relation being carried, or a pick — the same as esc\n\
+             >  right-click, mid a    let go of it instead — a held handle, a relation\n\
+             >  drag or a hold        being carried — the same as esc\n\
+             >  right-click,          the context menu: every command available right now,\n\
+             >  otherwise             read straight off the ? cheatsheet's own table\n\
              >  scroll                pan the view, a step at a time\n\
              \n\
              A drag that never moves anything is a click: nothing is written to the\n\
@@ -496,6 +504,18 @@ fn build_pages() -> Vec<Page> {
              go picks every shape it touches, the same set V and a motion would. See\n\
              |relations| for what the picker does once a line is dropped, and |editing|\n\
              for undo — a mouse drag is one undo step, like any edit.\n\
+             \n\
+             # the context menu\n\
+             \n\
+             An idle right-click — nothing held, nothing being reshaped — opens a menu of\n\
+             every command that is available right where the cursor lands: j/k to a row,\n\
+             enter runs it exactly as the ? menu's own enter would, esc closes it without\n\
+             doing anything. A current pick or visual-mode selection is left exactly as it\n\
+             was rather than cleared, since acting on it — deleting it, say — is often the\n\
+             whole reason for asking; esc is still how to clear one outright. Nothing here\n\
+             is a second list of commands: it is the same table ? reads, filtered to what\n\
+             this moment allows, so the menu can never offer something the keyboard would\n\
+             refuse.\n\
              \n\
              :debug's \"last mouse\" row says what the last mouse event was, the way\n\
              \"last key\" does for the keyboard — the first thing to check when a click\n\
@@ -565,9 +585,9 @@ fn build_pages() -> Vec<Page> {
              valign; arrange — the kind, x, y, width, height in cells, snap to grid, the\n\
              drawing order (to front, to back, bring forward, send backward), its layer,\n\
              and its lock (see |stack|). A relation's: style — its kind and its look:\n\
-             a LOOK for the line colour, its ROUTE (straight; orthogonal, out along the\n\
+             a LOOK for the line colour, its ROUTE — orthogonal by default, out along the\n\
              longer axis, across, and in, turning where ELBOW on the arrange tab says;\n\
-             curved), line, width, either end, END SIZE, colour and opacity;\n\
+             straight, or curved — line, width, either end, END SIZE, colour and opacity;\n\
              text — its three labels, their font, size, bold, italic, colour and band,\n\
              and LABEL AT, per cent along the line for the centre one; arrange — the\n\
              port at each end, REVERSE, which\n\
@@ -847,6 +867,46 @@ fn build_pages() -> Vec<Page> {
              The tree is not saved — it is a memory of how the file just read in was laid\n\
              out, not part of the diagram itself, so it is there only until the next :open,\n\
              :new, or import of something else.\n"
+                .to_string(),
+        ),
+        page(
+            "workbench",
+            "*workbench*  a folder of diagrams, kept in sync with disk\n\
+             \n\
+             coArchi opens a folder as a model repository; :workbench does the same for this\n\
+             app's own files. :workbench <path> creates the folder if it is not there yet,\n\
+             remembers it, and docks a live tree of it on the LEFT — the mirror of :sheet's\n\
+             own dock on the right. Unlike |tree|, this is not a memory of one import:\n\
+             it is a real folder, read again after every change, and every folder in it is\n\
+             shown even before anything is in it — a folder here is org structure you are\n\
+             actively building, not a grouping derived from what happens to be inside it.\n\
+             \n\
+             A person may keep more than one — a personal folder and a team one — so bare\n\
+             :workbench toggles the panel if one is already open, and otherwise offers every\n\
+             folder ever opened, most-recently-accessed first. :wb is the short alias, and\n\
+             the |intro| start dialog offers the same list of remembered folders as its own\n\
+             third choice, for opening straight into one without a diagram in the way first.\n\
+             \n\
+             One row is one workspace file — this app's own format, exactly what :w writes —\n\
+             so a row can hold a whole family of related diagrams, not just one. Picking one\n\
+             adds every tab in it to what is already open; the workbench stays up so browsing\n\
+             continues. Nothing here replaces the tabs you already have, so — unlike :open —\n\
+             it never needs to ask about unsaved work first.\n\
+             \n\
+             >  j / k          move the selection\n\
+             >  enter          open a folder's diagram as new tabs; on a folder, fold/unfold\n\
+             >  → / ←          unfold / fold a folder\n\
+             >  n / N          a new diagram / a new folder, in whichever folder is under the\n\
+             >                 cursor (or beside it, standing on a diagram)\n\
+             >  r              rename the row under the cursor\n\
+             >  m              grab the row under the cursor to move it\n\
+             >  p              put whatever m grabbed into the folder under the cursor now\n\
+             >                 (esc, while something is grabbed, cancels the move instead)\n\
+             >  d              delete — a real rm, so the app asks first\n\
+             >  esc / q        close the panel\n\
+             \n\
+             On a terminal too narrow for both this and :sheet's own dock on the right, the\n\
+             workbench gives way and floats over the diagram instead of holding its column.\n"
                 .to_string(),
         ),
     ];

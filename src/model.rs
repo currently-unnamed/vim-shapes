@@ -1607,6 +1607,18 @@ impl Document {
         self.elements_in_order().into_iter().rev().find(|e| self.element_visible(e.id) && e.contains(p)).map(|e| e.id)
     }
 
+    /// The frontmost visible element a point is inside, or — failing that — whose hover
+    /// arrow it is on: what `hover` tracks, so an arrow drawn outside its shape's box stays
+    /// clickable right up until the mouse actually leaves its gutter, not the instant it
+    /// crosses the border on the way there.
+    pub fn element_near(&self, p: (f64, f64), arrow_tol: f64, arrow_gap: f64) -> Option<ElementId> {
+        self.elements_in_order()
+            .into_iter()
+            .rev()
+            .find(|e| self.element_visible(e.id) && (e.contains(p) || e.arrow_at(p, arrow_tol, arrow_gap).is_some()))
+            .map(|e| e.id)
+    }
+
     /// The relation whose route passes within `tol` cells of a point, if any — the nearest
     /// one, where more than one line crosses so close together.
     pub fn relation_at(&self, p: (f64, f64), tol: f64) -> Option<RelationId> {

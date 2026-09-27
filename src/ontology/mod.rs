@@ -2016,7 +2016,11 @@ impl RelationKind {
 
     pub fn notation(self) -> Notation {
         use LineStyle::*;
-        let n = |line, tail, head| Notation { line, tail, head, width: 1, color: None, route: crate::ontology::Route::Straight, end_size: crate::ontology::EndSize::Normal, opacity: 100 };
+        // Orthogonal is the default route for every kind — a diagram of boxes reads as
+        // engineering when its lines turn in right angles rather than cross on the diagonal.
+        // Straight stays the field's own serde default (`Route::is_default`) so a file saved
+        // before this changed keeps whatever route it already had.
+        let n = |line, tail, head| Notation { line, tail, head, width: 1, color: None, route: crate::ontology::Route::Orthogonal, end_size: crate::ontology::EndSize::Normal, opacity: 100 };
         match self {
             Composition => n(Solid, End::Diamond, End::None),
             Aggregation => n(Solid, End::HollowDiamond, End::None),
