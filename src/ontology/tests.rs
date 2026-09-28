@@ -230,6 +230,59 @@ fn the_spec_tabulates_the_same_rules_the_app_enforces() {
 }
 
 #[test]
+fn the_spec_names_the_wire_form_next_to_the_slug_so_a_file_need_not_be_guessed() {
+    // A file's own `"kind"` is the serde name (`application_component`), not the short slug
+    // `kind` gives (`component`) — writing the slug into a file is a runtime error away from
+    // being caught. `wire_kind` says the real string up front.
+    let spec = emit::spec();
+    let elements = spec["elements"].as_array().unwrap();
+    let component = elements.iter().find(|e| e["kind"] == "component" && e["layer"] == "application").unwrap();
+    assert_eq!(component["wire_kind"], "application_component");
+    let app_function = elements.iter().find(|e| e["kind"] == "app-function").unwrap();
+    assert_eq!(app_function["wire_kind"], "application_function");
+    let relations = spec["relations"].as_array().unwrap();
+    let link_type = relations.iter().find(|r| r["kind"] == "link-type").unwrap();
+    assert_eq!(link_type["wire_kind"], "link_type");
+    for e in elements {
+        let k: ShapeKind = serde_json::from_value(e["wire_kind"].clone()).expect("wire_kind must parse back to a ShapeKind");
+        assert_eq!(k.slug(), e["kind"].as_str().unwrap(), "wire_kind must round-trip to the same kind slug");
+    }
+}
+
+#[test]
+fn the_spec_documents_the_fields_that_take_no_kind_of_their_own() {
+    // `properties`/parameters and the three label fields are real JSON structure that no
+    // element/relation kind entry otherwise mentions — undocumented until read out of
+    // model.rs, which is exactly the gap this closes.
+    let spec = emit::spec();
+    let object_type = spec["elements"].as_array().unwrap().iter().find(|e| e["wire_kind"] == "object_type").unwrap();
+    assert_eq!(object_type["rows_field"], "properties");
+    let action_type = spec["elements"].as_array().unwrap().iter().find(|e| e["wire_kind"] == "action_type").unwrap();
+    assert_eq!(action_type["rows_field"], "properties");
+    let component = spec["elements"].as_array().unwrap().iter().find(|e| e["wire_kind"] == "application_component").unwrap();
+    assert!(component.get("rows_field").is_none(), "a component has no rows");
+
+    let prop_fields: Vec<&str> = spec["property_fields"]["fields"].as_array().unwrap().iter().map(|f| f["field"].as_str().unwrap()).collect();
+    for name in ["name", "type", "primary_key", "title", "array", "required", "shared", "api_name", "value_type", "description"] {
+        assert!(prop_fields.contains(&name), "property_fields is missing `{name}`");
+    }
+    let rel_fields: Vec<&str> = spec["relation_fields"]["fields"].as_array().unwrap().iter().map(|f| f["field"].as_str().unwrap()).collect();
+    assert_eq!(rel_fields, ["label", "tail_label", "head_label"]);
+}
+
+#[test]
+fn the_bundled_example_help_points_at_shows_what_help_claims_it_shows() {
+    let ws = crate::persistence::load(std::path::Path::new("examples/ontology-schema.json")).expect("the example --help points at must parse");
+    let d = &ws.tabs[0].diagram;
+    assert!(d.elements.iter().any(|e| e.kind == ObjectType && !e.properties.is_empty()), "an object type with properties");
+    assert!(d.elements.iter().any(|e| e.kind == Interface), "an interface");
+    assert!(
+        d.relations.iter().any(|r| r.kind == LinkType && r.label.as_deref().map(|l| !l.is_empty()).unwrap_or(false)),
+        "a named link type"
+    );
+}
+
+#[test]
 fn a_view_narrows_the_palette_and_free_does_not() {
     assert!(View::Technology.shows(Node));
     assert!(!View::Technology.shows(BusinessActor));

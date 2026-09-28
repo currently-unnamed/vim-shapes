@@ -36,6 +36,42 @@ pub fn spec() -> Value {
     );
     top.insert("elements".into(), ShapeKind::ALL.iter().map(|k| element(*k)).collect());
     top.insert("relations".into(), RelationKind::ALL.iter().map(|r| relation(*r)).collect());
+    // The two vocabularies an element/relation kind has — `kind`, the short slug this app's
+    // own commands and prose use, and `wire_kind`, the exact string a saved file's own `kind`
+    // field holds — are easy to conflate into one guess. Say the file schema once, here,
+    // instead of leaving it to be found by writing a guess and reading the error `--check`
+    // gives back.
+    top.insert(
+        "property_fields".into(),
+        field_schema(
+            &["object_type", "interface", "action_type"],
+            "the `properties` array on an element of one of these `wire_kind`s — an object type's or interface's properties, an action type's parameters",
+            &[
+                ("name", "string", "the property's own name — the only field with no default"),
+                ("type", "string", "one of the base types (string, integer, boolean, date, ...); \"string\" if omitted"),
+                ("primary_key", "boolean", "the property that identifies an object — one per object type"),
+                ("title", "boolean", "the property an object is shown by — must be a string-typed property"),
+                ("array", "boolean", "holds many values of `type` rather than one"),
+                ("required", "boolean", "an action type's parameter that must be given"),
+                ("shared", "boolean", "a shared property: one definition, used on many object types"),
+                ("api_name", "string", "the name code reads this property by, if different from `name`"),
+                ("value_type", "string", "a named value type this property adopts, for its constraints and meaning"),
+                ("description", "string", "free text describing the property"),
+            ],
+        ),
+    );
+    top.insert(
+        "relation_fields".into(),
+        field_schema(
+            &["every relation kind"],
+            "text on the relation itself, independent of `kind` — a link type's name and its cardinality reading at each end, but present on any relation",
+            &[
+                ("label", "string", "the text at the relation's centre — a link type's own name"),
+                ("tail_label", "string", "the text at the end nearest `from` — a link type's cardinality/role there"),
+                ("head_label", "string", "the text at the end nearest `to` — a link type's cardinality/role there"),
+            ],
+        ),
+    );
     top.insert(
         "views".into(),
         View::ALL
@@ -95,18 +131,27 @@ pub fn spec() -> Value {
 fn element(k: ShapeKind) -> Value {
     let mut m = Map::new();
     m.insert("kind".into(), json!(k.slug()));
+    // `kind` is the short slug `:add` and the manual use; `wire_kind` is the exact string a
+    // saved file's own `"kind"` holds — the two differ (`component` vs `application_component`)
+    // and a file written with the former fails to load with an error that names neither.
+    m.insert("wire_kind".into(), serde_json::to_value(k).expect("ShapeKind serializes to a string"));
     m.insert("name".into(), json!(k.name()));
     m.insert("layer".into(), json!(k.layer().name()));
     m.insert("category".into(), json!(k.category().name()));
     m.insert("shape".into(), json!(k.shape().name()));
     m.insert("tagline".into(), json!(k.tagline()));
     m.insert("summary".into(), json!(k.summary()));
+    if matches!(k, ShapeKind::ObjectType | ShapeKind::Interface | ShapeKind::ActionType) {
+        // See top-level `property_fields` for what this array's own entries hold.
+        m.insert("rows_field".into(), json!("properties"));
+    }
     Value::Object(m)
 }
 
 fn relation(r: RelationKind) -> Value {
     let mut m = Map::new();
     m.insert("kind".into(), json!(r.name()));
+    m.insert("wire_kind".into(), serde_json::to_value(r).expect("RelationKind serializes to a string"));
     m.insert("verb".into(), json!(r.verb()));
     m.insert("family".into(), json!(r.family().name()));
     m.insert("tagline".into(), json!(r.tagline()));
@@ -125,6 +170,29 @@ fn relation(r: RelationKind) -> Value {
         }
     }
     m.insert("allowed".into(), Value::Object(allowed));
+    Value::Object(m)
+}
+
+/// A JSON-field schema `--ontology` documents rather than leaves to be found by writing a
+/// guess and reading `--check`'s error. `applies_to` names the `wire_kind`s (or, for a
+/// schema shared by every relation, says so in words) the fields below appear on.
+fn field_schema(applies_to: &[&str], note: &str, fields: &[(&str, &str, &str)]) -> Value {
+    let mut m = Map::new();
+    m.insert("applies_to".into(), applies_to.iter().map(|a| json!(a)).collect());
+    m.insert("note".into(), json!(note));
+    m.insert(
+        "fields".into(),
+        fields
+            .iter()
+            .map(|(field, ty, note)| {
+                let mut f = Map::new();
+                f.insert("field".into(), json!(field));
+                f.insert("type".into(), json!(ty));
+                f.insert("note".into(), json!(note));
+                Value::Object(f)
+            })
+            .collect(),
+    );
     Value::Object(m)
 }
 

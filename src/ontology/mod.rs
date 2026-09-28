@@ -935,19 +935,26 @@ impl ShapeKind {
             Capability => Shape::Hexagon,
             ValueStream => Shape::Parallelogram,
             CourseOfAction => Shape::RoundedRectangle,
-            // The core stack: structure is square, behaviour is rounded, an actor is round, an
-            // event is a diamond, data is a cylinder, a network is a cloud.
+            // The core stack, each behaviour and each structural seam its own silhouette
+            // rather than one rounded box standing in for all of them: an actor is round; a
+            // role tapers, since it is an actor narrowed to one part they play; an interface
+            // is a card with its corner cut, the seam a caller actually plugs into; a
+            // component carries its own two side-rails, the UML mark for a replaceable part;
+            // a function is a plain rounded box, the mildest shape here because it is the
+            // default behaviour; a process is a chevron, since it is a function with a
+            // direction; a service is a capsule, rounded all the way at both ends, since it
+            // is what a process looks like from outside the box. An event is a diamond, data
+            // a cylinder, a network a cloud.
             BusinessActor => Shape::Ellipse,
-            BusinessRole | BusinessInterface | ApplicationInterface | TechnologyInterface => {
-                Shape::RoundedRectangle
-            }
-            BusinessProcess | BusinessFunction | BusinessService | ApplicationFunction
-            | ApplicationProcess | ApplicationService | TechnologyFunction | TechnologyProcess
-            | TechnologyService => Shape::RoundedRectangle,
+            BusinessRole => Shape::Trapezoid,
+            BusinessInterface | ApplicationInterface | TechnologyInterface => Shape::Card,
+            BusinessProcess | ApplicationProcess | TechnologyProcess => Shape::Step,
+            BusinessFunction | ApplicationFunction | TechnologyFunction => Shape::RoundedRectangle,
+            BusinessService | ApplicationService | TechnologyService => Shape::DataStorage,
             BusinessEvent | ApplicationEvent | ImplementationEvent => Shape::Diamond,
             BusinessObject | Artifact | Deliverable => Shape::Rectangle,
             DataObject => Shape::Cylinder,
-            ApplicationComponent | Node | Device | SystemSoftware => Shape::Rectangle,
+            ApplicationComponent | Node | Device | SystemSoftware => Shape::PredefinedProcess,
             CommunicationNetwork => Shape::Cloud,
             WorkPackage => Shape::RoundedRectangle,
             Plateau => Shape::Rectangle,

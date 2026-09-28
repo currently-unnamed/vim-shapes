@@ -387,10 +387,12 @@ fn build_pages() -> Vec<Page> {
              >  tab         on a shape: its first relation; on a relation: its next node\n\
              >  gd          on a relation: go to its other end\n\
              >  ^o ^i       back and forward along the jumps gd and / have made\n\
+             >  ^d ^u       page the view a full screen down / up, cursor and all left where\n\
+             >              they were — on a shape or not, it always works\n\
              >  zz          centre the view on the cursor\n\
              >  zh zj zk zl pan the view a step; zH zJ zK zL half a screen; shift+arrows too\n\
-             >  zv          pan freely: hjkl move the view, ^d/^u a full screen, esc comes\n\
-             >              back — the cursor stays\n\
+             >  zv          pan freely: hjkl move the view, ^d/^u the same full screen, esc\n\
+             >              comes back — the cursor stays\n\
              \n\
              The view follows the cursor, moving as little as it can. A diagram is very\n\
              often bigger than the terminal, and that is fine.\n"
@@ -417,7 +419,7 @@ fn build_pages() -> Vec<Page> {
              \n\
              # a shape and its relation, in one move\n\
              \n\
-             ^hjkl on a shape opens a linked shape on that side, ^yubn at that corner —\n\
+             ^hjkl on a shape opens a linked shape on that side, ^ypbn at that corner —\n\
              from the diagram, without stepping in — and the same chords work from inside\n\
              the shape, out of its handles.\n\
              \n\
@@ -625,7 +627,7 @@ fn build_pages() -> Vec<Page> {
              \n\
              A terminal without the kitty keyboard protocol sends shift+ctrl+h as ctrl+h.\n\
              There, ^h ^j ^k ^l on the diagram are the four-cell move as well, and a\n\
-             linked shape comes from o, the corners ^y ^u ^b ^n, or i then a side. The\n\
+             linked shape comes from o, the corners ^y ^p ^b ^n, or i then a side. The\n\
              ? menu says so where you stand, and :debug names the kind of terminal.\n\
              \n\
              # the sheet\n\
@@ -723,7 +725,7 @@ fn build_pages() -> Vec<Page> {
              >  ^h ^j ^k ^l    open a LINKED shape on that side — the add dialog, then\n\
              >                 (architecture) the kind of relation, then its label. It lands\n\
              >                 beside that side, joined handle to facing handle.\n\
-             >  ^y ^u ^b ^n    the same at a corner: up-left, up-right, down-left, down-right\n\
+             >  ^y ^p ^b ^n    the same at a corner: up-left, up-right, down-left, down-right\n\
              >  o              the same, out of whichever handle you are standing on\n\
              >                 In the dialog a compass shows the direction; change your mind\n\
              >                 with the same ^-chord, or tab onto the compass and hjkl / yubn.\n\
@@ -889,10 +891,14 @@ fn build_pages() -> Vec<Page> {
              >  :tabnew <path>    a tab exported with :export <file.diagram>, opened as a new tab\n\
              >  V                 preview: the tab as a PNG, opened at once\n\
              \n\
-             The file holds every tab (see |tabs|). It is JSON, pretty-printed, and names kinds by their slug —\n\
-             \"kind\": \"business_process\" — so it diffs and can be edited by hand. A file\n\
-             that names an element that is not there is refused whole rather than opened\n\
-             half-broken.\n\
+             The file holds every tab (see |tabs|). It is JSON, pretty-printed, and diffs and\n\
+             can be edited by hand — but names a kind by its full, underscored name, not the\n\
+             short slug :add and this manual use: \"kind\": \"application_component\", never\n\
+             \"component\". vim-shapes --ontology gives every kind's exact string as\n\
+             wire_kind, and the JSON structure a property or a relation's label takes as\n\
+             property_fields and relation_fields — read those before writing a file by hand.\n\
+             A file that names an element that is not there is refused whole rather than\n\
+             opened half-broken.\n\
              \n\
              :import reads four other things back, replacing this diagram — a directory\n\
              means coArchi, otherwise the file formats are told apart by content, not\n\
@@ -1358,7 +1364,11 @@ fn build_pages() -> Vec<Page> {
          actions with parameters and rules. :export ontology.json writes a plain definition\n\
          in the SDK's casing. Draw.io gets UML class cells. :lint and --check add the\n\
          schema's checks: no primary key, two of them, a title that is not a string, an\n\
-         unnamed link type, an interface nothing implements, an action with no rule.\n"
+         unnamed link type, an interface nothing implements, an action with no rule — each\n\
+         naming the field it means, not just the key that fixes it in the app.\n\
+         \n\
+         examples/ontology-schema.json in the source is a small worked file: two object\n\
+         types, an interface, a named link type between them.\n"
             .to_string(),
     ));
     pages.push(page("commands", t));

@@ -722,7 +722,7 @@ mod page_tests {
         let mut term = Terminal::new(TestBackend::new(60, 16)).unwrap();
         term.draw(|f| {
             f.render_widget(
-                Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, hover_arrow: None, marquee: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
+                Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, hover_arrow: None, marquee: None, mouse: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
                 f.area(),
             )
         })
@@ -778,7 +778,7 @@ mod page_tests {
             let mut term = Terminal::new(TestBackend::new(60, 16)).unwrap();
             term.draw(|f| {
                 f.render_widget(
-                    Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, hover_arrow: None, marquee: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
+                    Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, hover_arrow: None, marquee: None, mouse: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
                     f.area(),
                 )
             })
@@ -864,7 +864,7 @@ mod tests {
                 letters: None,
                 insert: None,
                 refused: &[],
-                reshape: None, hover: None, hover_arrow: None, marquee: None,
+                reshape: None, hover: None, hover_arrow: None, marquee: None, mouse: None,
                 labels: true,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -897,7 +897,7 @@ mod tests {
                 letters: None,
                 insert: None,
                 refused: &[],
-                reshape: None, hover: None, hover_arrow: None, marquee: None,
+                reshape: None, hover: None, hover_arrow: None, marquee: None, mouse: None,
                 labels: true,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -932,7 +932,7 @@ mod tests {
             letters: None,
             insert: None,
             refused: &[],
-            reshape: None, hover: None, hover_arrow: None, marquee: None,
+            reshape: None, hover: None, hover_arrow: None, marquee: None, mouse: None,
             labels: true,
             grid: true,
             ink: crate::ui::wire::Ink::Braille,
@@ -974,7 +974,7 @@ mod tests {
                 reshape: None,
                 hover: Some(a),
                 hover_arrow: None,
-                marquee: None,
+                marquee: None, mouse: None,
                 labels: false,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -984,6 +984,49 @@ mod tests {
         );
         assert!(out.contains('◇'), "an unpatched hover handle is a fixed line-art glyph, not a braille mark, whatever the document's own ink: {out}");
         assert!(out.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)), "the shape's own outline is still braille — only the control changed: {out}");
+    }
+
+    #[test]
+    fn the_relation_in_hand_reaches_the_raw_mouse_point_over_open_ground() {
+        // `cursor` here equals `holding` — the same state `App::mouse_left_drag` leaves it in
+        // while a ctrl-drag is out over nothing, since it has no other element to fall back to.
+        // Only `mouse` — the raw point — tells the renderer where the drag actually is; without
+        // it the preview has nothing to reach for and paints nothing until the drag lands on a
+        // second shape. Checked against both inks — `canvas::Scene::paint`'s braille path and
+        // `wire::draw`'s line-art path carry the same fallback, and a fix landed in only one
+        // would leave the other still waiting for the drag to land on a shape.
+        for ink in [crate::ui::wire::Ink::Braille, crate::ui::wire::Ink::Lines] {
+            let mut doc = Document::default();
+            let a = doc.add(ShapeKind::Box, "a", 2.0, 2.0);
+            let out = screen(
+                Scene {
+                    doc: &doc,
+                    cursor: Some(a),
+                    focus_rel: None,
+                    focus_node: Node::Centre,
+                    holding: Some(a),
+                    picked: &[],
+                    camera: (0.0, 0.0),
+                    letters: None,
+                    insert: None,
+                    refused: &[],
+                    reshape: None,
+                    hover: None,
+                    hover_arrow: None,
+                    marquee: None,
+                    mouse: Some((50.0, 15.0)),
+                    labels: false,
+                    grid: false,
+                    ink,
+                },
+                60,
+                20,
+            );
+            let far_corner_marked = (40..60)
+                .flat_map(|x| (10..20).map(move |y| (x, y)))
+                .any(|(x, y)| out.lines().nth(y).and_then(|line| line.chars().nth(x)).is_some_and(|c| c != ' '));
+            assert!(far_corner_marked, "{ink:?}: a dashed line reaches toward the raw mouse point, well outside the shape's own box: {out}");
+        }
     }
 
     #[test]
@@ -1006,7 +1049,7 @@ mod tests {
             reshape: None,
             hover,
             hover_arrow: None,
-            marquee: None,
+            marquee: None, mouse: None,
             labels: false,
             grid: false,
             ink: crate::ui::wire::Ink::Braille,
@@ -1036,7 +1079,7 @@ mod tests {
             reshape: None,
             hover: None,
             hover_arrow: None,
-            marquee: None,
+            marquee: None, mouse: None,
             labels: false,
             grid: false,
             ink: crate::ui::wire::Ink::Braille,
@@ -1081,7 +1124,7 @@ mod tests {
                 reshape: None,
                 hover: None,
                 hover_arrow: None,
-                marquee: None,
+                marquee: None, mouse: None,
                 labels: false,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -1129,7 +1172,7 @@ mod tests {
             reshape: None,
             hover: None,
             hover_arrow: None,
-            marquee: None,
+            marquee: None, mouse: None,
             labels: false,
             grid: false,
             ink: crate::ui::wire::Ink::Braille,
@@ -1164,7 +1207,7 @@ mod tests {
                 letters: None,
                 insert: None,
                 refused: &[],
-                reshape: None, hover: None, hover_arrow: None, marquee: None,
+                reshape: None, hover: None, hover_arrow: None, marquee: None, mouse: None,
                 labels: true,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -1224,7 +1267,7 @@ mod tests {
             letters: None,
             insert,
             refused: &[],
-            reshape: None, hover: None, hover_arrow: None, marquee: None,
+            reshape: None, hover: None, hover_arrow: None, marquee: None, mouse: None,
             labels: true,
             grid: true,
             ink: crate::ui::wire::Ink::Braille,

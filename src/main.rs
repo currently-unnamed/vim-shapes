@@ -46,6 +46,10 @@ vim-shapes — architecture diagrams, driven like vim
                                 a coArchi model repository, written out as a workbench
                                 folder of this app's own files — one per view, folders
                                 mirroring the model's own — and exit
+
+  examples/ontology-schema.json in the source tree is a worked file: object types with
+  properties, an interface, a named link type — the fields `--ontology`'s `property_fields`
+  and `relation_fields` describe, written out.
 ";
 
 fn main() -> io::Result<()> {

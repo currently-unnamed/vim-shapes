@@ -587,15 +587,20 @@ pub fn paint(scene: &Scene, area: Rect, buf: &mut Buffer) {
             }
         }
     }
-    // The relation in hand.
-    if let (Some(from), Some(to)) = (scene.holding, scene.cursor)
-        && from != to
-        && let (Some(a), Some(b)) = (doc.element(from), doc.element(to))
+    // The relation in hand: an element's edge if the cursor is over one, else the raw mouse
+    // point over open ground — the same fallback `canvas::Scene::paint`'s braille path uses,
+    // so the line appears the moment the drag leaves `holding`'s element.
+    if let Some(from) = scene.holding
+        && let Some(a) = doc.element(from)
     {
-        let p1 = cell(shapes::edge_point(a.x, a.y, a.w, a.h, b.center()));
-        let p2 = cell(shapes::edge_point(b.x, b.y, b.w, b.h, a.center()));
-        g.segment(p1, p2, Weight::Dashed, theme::t().yellow);
-        g.fixed(p2.0, p2.1, end_glyph(End::Arrow, (p2.0 - p1.0, p2.1 - p1.1)).unwrap_or('▶'), theme::t().yellow);
+        let to_elem = scene.cursor.filter(|&to| to != from).and_then(|to| doc.element(to));
+        let far = to_elem.map(|b| b.center()).or(scene.mouse);
+        if let Some(far) = far {
+            let p1 = cell(shapes::edge_point(a.x, a.y, a.w, a.h, far));
+            let p2 = cell(to_elem.map(|b| shapes::edge_point(b.x, b.y, b.w, b.h, a.center())).unwrap_or(far));
+            g.segment(p1, p2, Weight::Dashed, theme::t().yellow);
+            g.fixed(p2.0, p2.1, end_glyph(End::Arrow, (p2.0 - p1.0, p2.1 - p1.1)).unwrap_or('▶'), theme::t().yellow);
+        }
     }
     // A marquee in progress: a dashed box from its anchor to wherever the mouse is now.
     if let Some(((ax, ay), (bx, by))) = scene.marquee {

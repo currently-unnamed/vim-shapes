@@ -60,7 +60,7 @@ The vocabulary follows the common layered enterprise-architecture modelling conv
 
 ### Shapes carry the distinction
 
-A terminal cannot draw an icon in the corner of a box, so the *outline* has to do the work: a rounded box is behaviour, a square one is structure, an ellipse is an actor, a diamond is an event, a cylinder is data, a cloud is a network, a dashed box is a grouping. The short tag is printed inside as well, so nothing rests on the reader knowing the code. Everything is drawn from points and straight segments through one braille canvas, and nothing is a box-drawing glyph that would refuse to meet a curve at the corner.
+A terminal cannot draw an icon in the corner of a box, so the *outline* has to do the work, and each seam in the core stack gets its own rather than sharing one rounded box: an actor is round; a role tapers, since it is an actor narrowed to one part they play; an interface is a card with its corner cut, the seam a caller actually plugs into; a component carries its own two side-rails, the flowchart's mark for a step defined elsewhere; a function is a plain rounded box, the mildest shape here because it is the default behaviour; a process is a chevron, since it is a function with a direction; a service is a capsule, rounded all the way at both ends, since it is what a process looks like from outside the box; an event is a diamond, data a cylinder, a network a cloud, a grouping a dashed box. The short tag is printed inside as well, so nothing rests on the reader knowing the code. Everything is drawn from points and straight segments through one braille canvas, and nothing is a box-drawing glyph that would refuse to meet a curve at the corner.
 
 ### The rules are one function, and they are advisory
 

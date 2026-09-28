@@ -377,11 +377,13 @@ pub static COMMANDS: &[Cmd] = &[
         title: "",
     },
     Cmd {
-        keys: "^y ^u ^b ^n",
+        // ^p, not ^u — ^u now pages the view everywhere, corner or not, so the up-right
+        // corner moved off it.
+        keys: "^y ^p ^b ^n",
         short: "",
         what: |_| "open a linked shape at that corner — up-left, up-right, down-left, down-right",
         section: Section::Edit,
-        on: &[Stroke::ctrl('y'), Stroke::ctrl('u'), Stroke::ctrl('b'), Stroke::ctrl('n')],
+        on: &[Stroke::ctrl('y'), Stroke::ctrl('p'), Stroke::ctrl('b'), Stroke::ctrl('n')],
         prefix: None,
         avail: |w| match w.mode {
             Mode::Reshape => need(!w.held && !w.moving_end, "let go first — enter, or esc"),
@@ -401,7 +403,7 @@ pub static COMMANDS: &[Cmd] = &[
         on: &[Stroke::ctrl('h'), Stroke::ctrl('j'), Stroke::ctrl('k'), Stroke::ctrl('l')],
         prefix: None,
         avail: |w| {
-            need(!w.plain_keys, "this terminal sends shift+ctrl as ctrl, so ^hjkl move the shape here — ^yubn, o, or i then a side")
+            need(!w.plain_keys, "this terminal sends shift+ctrl as ctrl, so ^hjkl move the shape here — ^ypbn, o, or i then a side")
                 .and(need(w.normal() && w.on_body() && !w.holding, ON_BODY))
         },
         run: &[],
@@ -409,11 +411,11 @@ pub static COMMANDS: &[Cmd] = &[
         title: "",
     },
     Cmd {
-        keys: "^y ^u ^b ^n",
+        keys: "^y ^p ^b ^n",
         short: "",
         what: |_| "open a linked shape at that corner — as from inside",
         section: Section::Relate,
-        on: &[Stroke::ctrl('y'), Stroke::ctrl('u'), Stroke::ctrl('b'), Stroke::ctrl('n')],
+        on: &[Stroke::ctrl('y'), Stroke::ctrl('p'), Stroke::ctrl('b'), Stroke::ctrl('n')],
         prefix: None,
         avail: |w| need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         run: &[],
@@ -654,13 +656,15 @@ pub static COMMANDS: &[Cmd] = &[
         title: "",
     },
     Cmd {
+        // Universal — the diagram, picking, or already panning with zv: standing on a shape
+        // never blocks it (unlike ^y ^p ^b ^n, which only exists on one).
         keys: "^d ^u",
         short: "",
-        what: |_| "pan the view a full screen down / up",
+        what: |_| "page the view a full screen down / up",
         section: Section::Move,
         on: &[Stroke::ctrl('d'), Stroke::ctrl('u')],
         prefix: None,
-        avail: |w| need(w.mode == Mode::View, "pan freely first — zv"),
+        avail: |w| need(matches!(w.mode, Mode::Normal | Mode::Visual | Mode::View), ONLY_NORMAL),
         run: &[],
         menu: false,
         title: "",

@@ -298,17 +298,17 @@ pub fn check(doc: &Document) -> Vec<String> {
             ShapeKind::ObjectType => {
                 let keys = e.properties.iter().filter(|p| p.primary_key).count();
                 if e.properties.is_empty() {
-                    out.push(format!("{who} has no properties — P adds them"));
+                    out.push(format!("{who} has no properties — give it a `properties` array (P adds one in the app)"));
                 } else if keys == 0 {
-                    out.push(format!("{who} has no primary key — p on a row in the property browser"));
+                    out.push(format!("{who} has no primary key — set `primary_key: true` on one property (p on a row in the property browser)"));
                 } else if keys > 1 {
-                    out.push(format!("{who} has {keys} primary keys — one identifies an object"));
+                    out.push(format!("{who} has {keys} properties with `primary_key: true` — one identifies an object"));
                 }
                 if e.properties.iter().any(|p| p.title && !matches!(p.base_type, crate::model::BaseType::String)) {
-                    out.push(format!("{who}'s title is not a string — a title is what an object is shown by"));
+                    out.push(format!("{who} has a `title: true` property whose `type` is not `string` — a title is what an object is shown by"));
                 }
                 if !e.properties.is_empty() && !e.properties.iter().any(|p| p.title) {
-                    out.push(format!("{who} has no title property — l on a row"));
+                    out.push(format!("{who} has no property with `title: true` — a title is what an object is shown by (l on a row in the app)"));
                 }
             }
             ShapeKind::Interface => {
@@ -324,7 +324,7 @@ pub fn check(doc: &Document) -> Vec<String> {
     }
     for r in &doc.relations {
         if r.kind == RelationKind::LinkType && r.label.as_deref().unwrap_or("").is_empty() {
-            out.push(format!("the link type between {} and {} has no name — t on its centre node", name(doc, r.from), name(doc, r.to)));
+            out.push(format!("the link type between {} and {} has no `label` — that's its name (t on its centre node)", name(doc, r.from), name(doc, r.to)));
         }
     }
     out
@@ -417,8 +417,8 @@ mod tests {
         b.base_type = BaseType::Integer;
         e.properties = vec![a, b];
         let warnings = check(&d);
-        assert!(warnings.iter().any(|w| w.contains("2 primary keys")), "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("title is not a string")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("2 properties with `primary_key: true`")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("`title: true` property whose `type` is not `string`")), "{warnings:?}");
         d.metadata.view = View::Free;
         assert!(!check(&d).is_empty(), "the checks follow the types, not the view");
         assert!(check(&Document::default()).is_empty(), "and say nothing without them");

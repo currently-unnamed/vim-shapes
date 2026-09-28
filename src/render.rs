@@ -66,6 +66,7 @@ pub fn cells(doc: &Document, grid: bool, labels: bool, border: f64) -> Buffer {
         hover: None,
         hover_arrow: None,
         marquee: None,
+        mouse: None,
         labels,
         grid,
         ink: crate::ui::wire::ink(),

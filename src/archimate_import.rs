@@ -41,8 +41,8 @@ use crate::drawio_export::{CELL_H, CELL_W};
 use crate::drawio_import::unescape;
 use crate::layout;
 use crate::persistence;
-use crate::model::{Document, ElementId, Fill, Tab, Tag, Workspace, WORKSPACE_VERSION};
-use crate::ontology::{Colour, RelationKind, ShapeKind};
+use crate::model::{Document, ElementId, Tab, Tag, Workspace, WORKSPACE_VERSION};
+use crate::ontology::{RelationKind, ShapeKind};
 
 #[derive(Debug)]
 pub enum ImportError {
@@ -95,10 +95,6 @@ struct RawNode {
     y: f64,
     w: f64,
     h: f64,
-    /// A diagram object's own fill/outline colour, when the source set one — `None` leaves
-    /// this app's own ontology-driven look alone, the same as an element this app drew itself.
-    fill: Option<Colour>,
-    line: Option<Colour>,
 }
 
 /// A line drawn on a view. Most name a real model relationship (`relationship_ref`), resolved
@@ -308,7 +304,7 @@ fn read_node(e: &BytesStart) -> Result<Option<RawNode>, ImportError> {
             _ => {}
         }
     }
-    Ok(element_ref.map(|element_ref| RawNode { identifier, element_ref, x, y, w, h, fill: None, line: None }))
+    Ok(element_ref.map(|element_ref| RawNode { identifier, element_ref, x, y, w, h }))
 }
 
 /// `relationship_ref` is `None` for a connection with no `relationshipRef` — a plain visual
@@ -424,12 +420,6 @@ fn add_node(doc: &mut Document, e: &RawElement, n: &RawNode) -> ElementId {
         let (min_w, min_h) = kind.default_size();
         el.w = (n.w / CELL_W).max(min_w);
         el.h = (n.h / CELL_H).max(min_h);
-    }
-    if let Some(c) = n.fill {
-        el.fill = Fill::Colour(c);
-    }
-    if let Some(c) = n.line {
-        el.color = Some(c);
     }
     id
 }
@@ -880,10 +870,11 @@ fn walk_coarchi_node(node: &XmlNode, offset: (f64, f64), elements: &mut Vec<RawE
     };
     let here = (offset.0 + bx, offset.1 + by);
     let identifier = node.attr("id").to_string();
-    let fill = Colour::parse(node.attr("fillColor"));
-    let line = Colour::parse(node.attr("lineColor"));
+    // Archi's own `fillColor`/`lineColor` are a view's arbitrary choice, not the model's —
+    // never carried over, so an import gets this app's own ontology-driven look throughout,
+    // the same as an element drawn here from scratch.
     if let Some(el) = node.child("archimateElement") {
-        nodes.push(RawNode { identifier, element_ref: href_id(el.attr("href")), x: here.0, y: here.1, w, h, fill, line });
+        nodes.push(RawNode { identifier, element_ref: href_id(el.attr("href")), x: here.0, y: here.1, w, h });
     } else {
         let synthetic = match strip_ns(node.attr("type")) {
             "DiagramModelNote" => Some(("Note".to_string(), node.attr("content").to_string())),
@@ -897,7 +888,7 @@ fn walk_coarchi_node(node: &XmlNode, offset: (f64, f64), elements: &mut Vec<RawE
         };
         if let Some((kind, name)) = synthetic {
             elements.push(RawElement { id: identifier.clone(), kind, name, documentation: None, tags: Vec::new() });
-            nodes.push(RawNode { identifier: identifier.clone(), element_ref: identifier, x: here.0, y: here.1, w, h, fill, line });
+            nodes.push(RawNode { identifier: identifier.clone(), element_ref: identifier, x: here.0, y: here.1, w, h });
         }
     }
     for child in &node.children {
@@ -1275,8 +1266,8 @@ mod tests {
         let crm = doc.elements.iter().find(|e| e.label == "CRM").expect("CRM");
         assert_eq!(crm.documentation.as_deref(), Some("What CRM does"));
         assert_eq!(crm.tags, vec![Tag { key: "Owner".into(), value: "Team A".into() }]);
-        assert_eq!(crm.fill, Fill::Colour(Colour::Hex([0x11, 0x22, 0x33])), "the view's own fillColor, not the layer's");
-        assert_eq!(crm.color, Some(Colour::Hex([0x44, 0x55, 0x66])), "the view's own lineColor, as the outline override");
+        assert_eq!(crm.fill, crate::model::Fill::Auto, "the view's own fillColor is arbitrary and stays behind — this app's own layer look wins");
+        assert_eq!(crm.color, None, "and so does its lineColor — no outline override carried over");
 
         // A Junction has no concept of its own here — it draws as the same plain circle a
         // sketch uses for a node, rather than the generic labelled box an unmapped type gets.

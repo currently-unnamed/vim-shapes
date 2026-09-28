@@ -51,6 +51,11 @@
                 "primary_key": true
               },
               {
+                "name": "reference",
+                "type": "string",
+                "title": true
+              },
+              {
                 "name": "orderDate",
                 "type": "string"
               },
@@ -118,6 +123,7 @@
             "kind": "link_type",
             "from": 0,
             "to": 1,
+            "label": "places",
             "tail_label": "1",
             "head_label": "*"
           },

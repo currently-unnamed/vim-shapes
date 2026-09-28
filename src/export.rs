@@ -646,6 +646,10 @@ mod tests {
     #[test]
     fn on_paper_the_picture_is_the_page_with_the_ground_and_shadows_the_diagram_asks() {
         let mut d = doc();
+        // A rounded corner only replaces `Shape::Rectangle`; a component now carries its own
+        // side-rails instead, so swap it for a plain rectangle kind to still exercise that.
+        let billing = d.elements.iter().find(|e| e.label == "Billing").unwrap().id;
+        d.element_mut(billing).unwrap().kind = ShapeKind::Artifact;
         d.metadata.page.page_view = true;
         d.metadata.page.paper = crate::model::Paper::A5;
         d.metadata.page.background = Some(Colour::Hex([10, 20, 30]));

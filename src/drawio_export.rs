@@ -394,7 +394,10 @@ mod tests {
         doc.relation_mut(r).unwrap().style = Some(look);
         let xml = to_xml(&doc);
         assert!(xml.contains("style=\"curved=1;rounded=0;html=1;") && !xml.contains("<Array"), "{xml}");
-        doc.element_mut(a).unwrap().skew = -3.0;
+        // A leaned rectangle is a draw.io parallelogram — a plain-rectangle kind's own case,
+        // not `a`'s any more now a component carries its own two side-rails.
+        let rect = doc.add(ShapeKind::Artifact, "leaned", 40.0, 20.0);
+        doc.element_mut(rect).unwrap().skew = -3.0;
         assert!(to_xml(&doc).contains("shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;size=30;flipH=1;"), "a leaned rectangle");
     }
 }

@@ -1029,6 +1029,13 @@ impl App {
         self.panned = true;
     }
 
+    /// ^d / ^u: a full screen down (`dir` positive) or up, `count` of them. The one home for
+    /// that jump — `view_key`'s own ^d/^u (panning with zv already held) and the plain
+    /// diagram's use the same math, so there is nothing to keep in step by hand.
+    fn page(&mut self, dir: f64, count: usize) {
+        self.pan(0.0, dir * self.view_size.1 as f64 * count as f64);
+    }
+
     /// A pan's steps: a few cells, or half the view.
     fn pan_step(&self, c: char, big: bool, count: usize) -> Option<(f64, f64)> {
         let (sx, sy) = if big { ((self.view_size.0 / 2) as f64, (self.view_size.1 / 2) as f64) } else { (PAN_X, PAN_Y) };
@@ -1141,8 +1148,8 @@ impl App {
             KeyCode::Right => self.pan(PAN_X * count as f64, 0.0),
             KeyCode::Up => self.pan(0.0, -PAN_Y * count as f64),
             KeyCode::Down => self.pan(0.0, PAN_Y * count as f64),
-            KeyCode::Char('d') if ctrl => self.pan(0.0, self.view_size.1 as f64 * count as f64),
-            KeyCode::Char('u') if ctrl => self.pan(0.0, -(self.view_size.1 as f64) * count as f64),
+            KeyCode::Char('d') if ctrl => self.page(1.0, count),
+            KeyCode::Char('u') if ctrl => self.page(-1.0, count),
             KeyCode::Char(c) => {
                 if let Some((dx, dy)) = self.pan_step(c, ctrl || c.is_ascii_uppercase(), count) {
                     self.pan(dx, dy);
@@ -2080,7 +2087,8 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let Some(id) = self.cursor else { return };
         // A ^direction with nothing in hand opens a linked shape that way: the four sides
-        // on ^hjkl, the four corners on ^yubn — the rogue-like's diagonals.
+        // on ^hjkl, the four corners on ^ypbn — the rogue-like's diagonals. 'p' for up-right,
+        // not 'u': ^u pages the view everywhere now, corner-handle or not.
         if ctrl && !rs.held && rs.moving.is_none() {
             let port = match k.code {
                 KeyCode::Char('h') | KeyCode::Char('H') => Some(7),
@@ -2088,7 +2096,7 @@ impl App {
                 KeyCode::Char('k') | KeyCode::Char('K') => Some(1),
                 KeyCode::Char('j') | KeyCode::Char('J') => Some(5),
                 KeyCode::Char('y') => Some(0),
-                KeyCode::Char('u') => Some(2),
+                KeyCode::Char('p') => Some(2),
                 KeyCode::Char('b') => Some(6),
                 KeyCode::Char('n') => Some(4),
                 _ => None,
@@ -2604,9 +2612,12 @@ impl App {
             (_, KeyCode::Down) if shift => self.pan(0.0, PAN_Y * count as f64),
             (_, KeyCode::Char('T')) => self.start_placing(),
             (_, KeyCode::Char('P')) => self.open_props(),
+            (_, KeyCode::Char('d')) if ctrl => self.page(1.0, count),
+            (_, KeyCode::Char('u')) if ctrl => self.page(-1.0, count),
             // ^-direction on a shape: a linked shape that way, exactly as from inside it.
-            (_, KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l' | 'y' | 'u' | 'b' | 'n'))) if ctrl => {
-                if let Some(port) = palette::dir_of(c) {
+            // 'p' stands in for the compass's own 'u' (up-right) — ^u pages the view now.
+            (_, KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l' | 'y' | 'p' | 'b' | 'n'))) if ctrl => {
+                if let Some(port) = palette::dir_of(if c == 'p' { 'u' } else { c }) {
                     self.open_off(Some(port));
                 }
             }
@@ -5192,6 +5203,7 @@ impl App {
                     hover: None,
                     hover_arrow: None,
                     marquee: None,
+                    mouse: None,
                     labels: true,
                     grid: false,
                     ink: wire::ink(),
@@ -5258,6 +5270,7 @@ impl App {
                 // apart from the other seven.
                 hover_arrow: self.mouse_pos.and_then(|p| self.hit_arrow(p)).map(|(_, dir)| dir),
                 marquee: self.marquee,
+                mouse: self.mouse_pos,
                 labels: true,
                 grid: self.doc.metadata.page.grid,
                 ink: wire::ink(),
@@ -5558,7 +5571,7 @@ impl App {
             } else {
                 let patched = self.cursor.is_some_and(|id| !self.doc.at_port(id, r.handle).is_empty());
                 let here = if patched { "enter pick up the relation   x disconnect" } else { "enter take hold to drag" };
-                strip(format!(" INSIDE   hjkl between the handles   {here}   o or ^hjkl/^yubn open a linked shape   esc out "), theme::t().yellow)
+                strip(format!(" INSIDE   hjkl between the handles   {here}   o or ^hjkl/^ypbn open a linked shape   esc out "), theme::t().yellow)
             }
         } else if self.pending_prefix == Some(Prefix::F) {
             strip(" jump: press an element's letter ".into(), theme::t().yellow)
@@ -6452,6 +6465,42 @@ mod tests {
         assert!(a.workbench.as_ref().unwrap().filter.is_empty());
         key(&mut a, KeyCode::Esc);
         assert!(a.workbench.is_none(), "esc with nothing left to clear closes the panel");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn ctrl_d_and_u_page_the_workbench_a_screen_at_a_time_clamped_not_wrapped() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-wbpage-config-{}", std::process::id()));
+        let _config_home = isolated_config_home(&config_dir);
+        let root = std::env::temp_dir().join(format!("vim-shapes-wbpage-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..40 {
+            persistence::save(&Workspace::single("t".into(), crate::model::Document::default()), &root.join(format!("diagram-{i:02}.json"))).unwrap();
+        }
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        let n = a.workbench.as_ref().unwrap().display_rows(a.registry.as_ref()).len();
+        assert_eq!(n, 40);
+
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        let page = a.workbench_area.map(|r| a.workbench.as_ref().unwrap().page_size(r)).unwrap();
+        assert!(page > 0 && page < n, "the terminal has to be small enough to actually page here: {page} of {n} rows");
+
+        a.on_key(Stroke::ctrl('d').event());
+        assert_eq!(a.workbench.as_ref().unwrap().sel, page, "one screen down");
+        a.on_key(Stroke::ctrl('u').event());
+        assert_eq!(a.workbench.as_ref().unwrap().sel, 0, "and back to the top");
+
+        for _ in 0..(n / page + 2) {
+            a.on_key(Stroke::ctrl('d').event());
+        }
+        assert_eq!(a.workbench.as_ref().unwrap().sel, n - 1, "clamped at the last row, not wrapped around like j");
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&config_dir).ok();
@@ -7537,7 +7586,7 @@ mod tests {
         assert_eq!(a.doc.element(x).unwrap().y, before.y + BIG_STEP);
         key(&mut a, KeyCode::Backspace);
         assert_eq!(a.doc.element(x).unwrap().x, before.x - BIG_STEP, "backspace is ctrl+h there");
-        a.on_key(Stroke::ctrl('u').event());
+        a.on_key(Stroke::ctrl('p').event());
         assert!(a.palette.is_some(), "a corner still opens a linked shape");
         key(&mut a, KeyCode::Esc);
         // Inside the shape, ctrl+hjkl keep their reshape meaning on a plain terminal.
@@ -8150,7 +8199,7 @@ mod tests {
         assert_eq!(a.doc.relations[0].from_port, Some(5));
         key(&mut a, KeyCode::Esc);
         a.set_cursor(x);
-        a.on_key(Stroke::ctrl('u').event());
+        a.on_key(Stroke::ctrl('p').event());
         assert_eq!(a.palette.as_ref().unwrap().dir, Some(2), "up-right, a corner");
         key(&mut a, KeyCode::Esc);
         // On a relation it is refused with the reason, not silently ignored.
@@ -8509,6 +8558,36 @@ mod tests {
         a.pan(200.0, 0.0);
         press(&mut a, "h");
         assert!(a.camera.0 < 100.0, "and it does follow, once the cursor is off the screen: {:?}", a.camera);
+    }
+
+    /// ^u used to be claimed twice — paging, and the up-right corner of ^y ^u ^b ^n — and
+    /// since the cursor is always on some shape (see |moving|), that second claim would have
+    /// won almost every time. ^u pages now; the corner moved to ^p.
+    #[test]
+    fn ctrl_d_and_u_page_the_grid_a_full_screen_even_standing_on_a_shape() {
+        let mut a = app();
+        let (x, _) = two(&mut a);
+        a.view_size = (80, 24);
+        a.camera = (0.0, 0.0);
+        assert!(matches!(a.whereami().on, Some(keymap::Spot { focus: keymap::Focus::Body, .. })), "the cursor is on a shape's body");
+        a.on_key(Stroke::ctrl('d').event());
+        assert_eq!(a.camera, (0.0, 24.0), "a full screen down, standing on a shape");
+        assert_eq!(a.cursor, Some(x), "the cursor did not move");
+        a.on_key(Stroke::ctrl('u').event());
+        assert_eq!(a.camera, (0.0, 0.0), "and back up");
+        press(&mut a, "2");
+        a.on_key(Stroke::ctrl('d').event());
+        assert_eq!(a.camera, (0.0, 48.0), "a count multiplies it, the same as any other motion");
+        // The corner-open gesture still works, one seat over: ^p, not ^u.
+        a.camera = (0.0, 0.0);
+        a.on_key(Stroke::ctrl('p').event());
+        assert_eq!(a.palette.as_ref().map(|p| p.dir), Some(Some(2)), "^p opens the up-right corner now");
+        key(&mut a, KeyCode::Esc);
+        // Picking something doesn't stop it either.
+        press(&mut a, "v");
+        assert_eq!(a.whereami().mode, Mode::Visual);
+        a.on_key(Stroke::ctrl('d').event());
+        assert_eq!(a.camera, (0.0, 24.0), "pages while picking too");
     }
 
     #[test]

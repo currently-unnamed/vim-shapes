@@ -72,9 +72,17 @@ pub fn scan(root: &Path) -> Vec<Node> {
 
 /// A name typed for a new folder, a new diagram, or a rename, made safe as a single path
 /// segment — a `/` in a typed name would otherwise silently reach outside the folder it was
-/// typed into.
+/// typed into. Also used on names read from imported files (`archimate_import`), where `.` or
+/// `..` is not just an odd rename but a directory an attacker-authored import can walk out of —
+/// so a cleaned name that is exactly `.` or `..` is defanged into dashes rather than passed
+/// through, since neither can otherwise appear from splitting on the separators above.
 pub(crate) fn sanitize(name: &str) -> String {
-    name.trim().chars().map(|c| if matches!(c, '/' | '\\' | '\0') { '-' } else { c }).collect()
+    let cleaned: String =
+        name.trim().chars().map(|c| if matches!(c, '/' | '\\' | '\0') { '-' } else { c }).collect();
+    match cleaned.as_str() {
+        "." | ".." => "-".repeat(cleaned.len()),
+        _ => cleaned,
+    }
 }
 
 pub fn new_folder(parent: &Path, name: &str) -> io::Result<PathBuf> {
@@ -172,6 +180,19 @@ mod tests {
         let Node::Diagram { path, name } = &nodes[0] else { panic!("scanning never parses — only opening does") };
         assert_eq!(name, "not-a-diagram.json");
         assert!(persistence::load(path).is_err(), "and opening it is what actually catches it");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_dot_dot_name_is_defanged_not_a_traversal() {
+        let root = tmp("traversal");
+        let escaped = root.parent().unwrap().join("vim-shapes-workbench-traversal-escaped");
+        fs::remove_dir_all(&escaped).ok();
+
+        let made = new_folder(&root, "..").unwrap();
+        assert!(made.starts_with(&root), "a folder named .. must land inside the parent it was made in, not above it: {made:?}");
+        assert!(!escaped.exists());
+
         fs::remove_dir_all(&root).ok();
     }
 
