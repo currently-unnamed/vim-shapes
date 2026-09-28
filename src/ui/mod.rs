@@ -5519,7 +5519,7 @@ impl App {
         }
         let r = Rect { x: area.x + area.width - right_w, width: right_w, ..area };
         f.render_widget(Paragraph::new(Line::from(right)), r);
-        (badge_w > 0).then(|| Rect { width: badge_w, ..r })
+        (badge_w > 0).then_some(Rect { width: badge_w, ..r })
     }
 
     fn draw_footer(&self, f: &mut Frame, foot: Rect) {

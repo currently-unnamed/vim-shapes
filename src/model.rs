@@ -2219,7 +2219,9 @@ mod tests {
         // up or down as side to side, so a diagonal ray leaves through whichever axis is
         // narrower first.
         let mid = ((e.x + e.right()) / 2.0, (e.y + e.bottom()) / 2.0);
-        let rays: [((f64, f64), (f64, f64), usize); 8] = [
+        // (start point, unit direction, direction index)
+        type Ray = ((f64, f64), (f64, f64), usize);
+        let rays: [Ray; 8] = [
             ((e.x, e.y), (-1.0, -1.0), 0),             // NW
             ((mid.0, e.y), (0.0, -1.0), 1),            // N
             ((e.right(), e.y), (1.0, -1.0), 2),        // NE
