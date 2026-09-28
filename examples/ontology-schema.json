@@ -1,0 +1,160 @@
+{
+  "version": 3,
+  "current": 0,
+  "tabs": [
+    {
+      "name": "ontology-schema",
+      "diagram": {
+        "version": 2,
+        "metadata": {
+          "title": "Order management — ontology schema",
+          "view": "ontology"
+        },
+        "elements": [
+          {
+            "id": 0,
+            "kind": "object_type",
+            "label": "Customer",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 22.0,
+            "h": 6.0,
+            "properties": [
+              {
+                "name": "customerId",
+                "type": "string",
+                "primary_key": true
+              },
+              {
+                "name": "name",
+                "type": "string",
+                "title": true
+              },
+              {
+                "name": "email",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "id": 1,
+            "kind": "object_type",
+            "label": "Order",
+            "x": 30.0,
+            "y": 0.0,
+            "w": 22.0,
+            "h": 6.0,
+            "properties": [
+              {
+                "name": "orderId",
+                "type": "string",
+                "primary_key": true
+              },
+              {
+                "name": "orderDate",
+                "type": "string"
+              },
+              {
+                "name": "status",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "id": 2,
+            "kind": "interface",
+            "label": "Payable",
+            "x": 60.0,
+            "y": 0.0,
+            "w": 22.0,
+            "h": 6.0,
+            "properties": [
+              {
+                "name": "amountDue",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "id": 3,
+            "kind": "action_type",
+            "label": "Place Order",
+            "x": 31.0,
+            "y": 9.0,
+            "w": 20.0,
+            "h": 5.0
+          },
+          {
+            "id": 4,
+            "kind": "shared_property",
+            "label": "ContactInfo",
+            "x": 0.0,
+            "y": 9.0,
+            "w": 16.0,
+            "h": 4.0
+          },
+          {
+            "id": 5,
+            "kind": "value_type",
+            "label": "EmailAddress",
+            "x": 0.0,
+            "y": 16.0,
+            "w": 16.0,
+            "h": 4.0
+          },
+          {
+            "id": 6,
+            "kind": "datasource",
+            "label": "CRM Database",
+            "x": 0.0,
+            "y": -8.0,
+            "w": 14.0,
+            "h": 5.0
+          }
+        ],
+        "relations": [
+          {
+            "id": 0,
+            "kind": "link_type",
+            "from": 0,
+            "to": 1,
+            "tail_label": "1",
+            "head_label": "*"
+          },
+          {
+            "id": 1,
+            "kind": "implements",
+            "from": 1,
+            "to": 2
+          },
+          {
+            "id": 2,
+            "kind": "creates",
+            "from": 3,
+            "to": 1
+          },
+          {
+            "id": 3,
+            "kind": "uses",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "id": 4,
+            "kind": "uses",
+            "from": 4,
+            "to": 5
+          },
+          {
+            "id": 5,
+            "kind": "backed_by",
+            "from": 0,
+            "to": 6
+          }
+        ],
+        "next_element_id": 7,
+        "next_relation_id": 6
+      }
+    }
+  ]
+}

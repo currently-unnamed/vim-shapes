@@ -17,6 +17,7 @@ pub mod expandpick;
 pub mod exportdlg;
 pub mod conflictpick;
 pub mod form;
+pub mod grep;
 pub mod help;
 pub mod importdlg;
 pub mod keymap;
@@ -160,11 +161,18 @@ const MIN_H: f64 = 2.0;
 /// nothing happened at all.
 #[derive(Clone, Debug, PartialEq)]
 enum MouseGesture {
-    /// An element's body: the ids a drag of it would move (locked ones already filtered out).
+    /// An element's body: the ids a drag of it would move (locked ones already filtered
+    /// out). The only thing a body drag ever does — there is no ambiguity to guess at away
+    /// from a handle.
     Body(Vec<ElementId>),
-    /// A handle of the cursor's element. `self.reshape`, set at the same moment, already says
-    /// whether it is a resize or a reroute — the mouse just triggers the same grab `Enter`
-    /// would, at `Down` instead of a keystroke.
+    /// A handle, ctrl held at the click: a drag draws a relation to wherever it lets go, the
+    /// same one-gesture compression the mouse's right-drag already does — released over
+    /// nothing, it just disappears, the same as backing out of the keyboard's own
+    /// hold-and-carry. The `ElementId` is the handle's own element, where it started.
+    Relate(ElementId),
+    /// A handle of the cursor's element, without ctrl. `self.reshape`, set at the same
+    /// moment, already says whether it is a resize or a reroute — the mouse just triggers
+    /// the same grab `Enter` would, at `Down` instead of a keystroke.
     Handle,
     /// Empty ground, at this world point — a drag turns it into a marquee.
     Ground((f64, f64)),
@@ -232,11 +240,20 @@ pub struct App {
     pending_label: Option<ElementId>,
     /// `o` or a `^`-direction from inside a shape: which handle the new shape opens out of.
     pending_port: Option<usize>,
+    /// `a` or `p`, run from the context menu: where it lands, instead of `free_spot`'s own
+    /// cursor/bounds-based guess — the point the menu was opened at, since there may not even
+    /// be a cursor there (empty ground) to be "beside".
+    pending_add_at: Option<(f64, f64)>,
     visual: bool,
     selection: Vec<ElementId>,
     holding: Option<ElementId>,
     insert: Option<Insert>,
     reshape: Option<Reshape>,
+    /// Bending the focused relation's one orthogonal turn — hjkl (whichever pair the route
+    /// runs on) pulls it, `enter`/`esc` let go. Its own flag rather than folded into
+    /// `Reshape`: there is nothing here to navigate to first (one relation has one turn),
+    /// and `Reshape.handle` means nothing without an element's own eight handles.
+    bending: bool,
     /// Presenting: the diagram alone, framed by its bounds.
     present: bool,
     /// The start dialog — up after the title screen when no file was asked for.
@@ -289,6 +306,10 @@ pub struct App {
     /// directly, rather than asking again or falling back to the config's cross-session
     /// recents list, which is for a session that has not opened one yet at all.
     workbench_root: Option<PathBuf>,
+    /// A `g/` content search over the whole workbench, drawn on top of the panel — open
+    /// alongside it (closing the search returns to the tree, not to the diagram) rather than
+    /// replacing it, the way `tree`/`props` sit over whatever opened them too.
+    grep: Option<grep::State>,
     /// The colour picker, over the sheet, while one is up.
     colour: Option<colour::State>,
     /// Colours picked this session, newest first — the picker's recent row.
@@ -373,11 +394,13 @@ impl App {
             node: Node::Centre,
             pending_label: None,
             pending_port: None,
+            pending_add_at: None,
             visual: false,
             selection: Vec::new(),
             holding: None,
             insert: None,
             reshape: None,
+            bending: false,
             present: false,
             start: None,
             debug: false,
@@ -405,6 +428,7 @@ impl App {
             workbench: None,
             registry: None,
             workbench_root: None,
+            grep: None,
             colour: None,
             recent_colours: Vec::new(),
             enhanced_keys: false,
@@ -1108,6 +1132,8 @@ impl App {
             Mode::View
         } else if self.reshape.is_some() {
             Mode::Reshape
+        } else if self.bending {
+            Mode::Bend
         } else if self.visual {
             Mode::Visual
         } else {
@@ -1119,11 +1145,11 @@ impl App {
     fn whereami(&self) -> Where {
         let on = self.cursor_element().map(|e| {
             let rels = self.doc.incident(e.id).len();
-            let (focus, refused) = match self.focused_relation() {
-                Some(r) => (Focus::Relation, self.doc.relation(r).is_some_and(|r| self.doc.check(r).is_err())),
-                None => (Focus::Body, false),
+            let (focus, refused, bend_across) = match self.focused_relation().and_then(|r| self.doc.relation(r)) {
+                Some(r) => (Focus::Relation, self.doc.check(r).is_err(), self.doc.bendable(r)),
+                None => (Focus::Body, false, None),
             };
-            Spot { focus, composite: e.kind.is_composite(), relations: rels, refused }
+            Spot { focus, composite: e.kind.is_composite(), relations: rels, refused, bend_across }
         });
         Where {
             mode: self.mode(),
@@ -1154,6 +1180,14 @@ impl App {
             const NAMES: [&str; 8] = ["top-left", "top", "top-right", "right", "bottom-right", "bottom", "bottom-left", "left"];
             let name = self.cursor_element().map(|e| e.display()).unwrap_or_default();
             return format!("reshaping {name} · {} handle{}", NAMES[r.handle.min(7)], if r.held { " in hand" } else { "" });
+        }
+        if self.bending {
+            let line = self
+                .focused_relation()
+                .and_then(|r| self.doc.relation(r))
+                .and_then(|r| Some((self.doc.element(r.from)?.display(), r.kind.verb(), self.doc.element(r.to)?.display())))
+                .map_or("a line".to_string(), |(from, verb, to)| format!("{from} {verb} {to}"));
+            return format!("bending {line} · turn in hand");
         }
         if self.visual {
             return format!("picking · {} picked", self.selection.len());
@@ -1352,14 +1386,18 @@ impl App {
         })
     }
 
-    /// Somewhere a `w × h` box fits: beside the cursor, then below it, then further along.
-    fn free_spot(&self, w: f64, h: f64) -> (f64, f64) {
-        let (sx, sy) = match self.cursor_element() {
-            Some(e) if e.kind.is_composite() => (e.x + 2.0, e.y + 2.0),
-            Some(e) => (e.right() + layout::GUT_X, e.y),
-            None => match self.doc.bounds() {
-                Some((bx, _, _, bb)) => (bx, bb + layout::GUT_Y),
-                None => (self.camera.0 + 2.0, self.camera.1 + 2.0),
+    /// Somewhere a `w × h` box fits: at a pending menu click, if there is one; else beside the
+    /// cursor, then below it, then further along.
+    fn free_spot(&mut self, w: f64, h: f64) -> (f64, f64) {
+        let (sx, sy) = match self.pending_add_at.take() {
+            Some(p) => p,
+            None => match self.cursor_element() {
+                Some(e) if e.kind.is_composite() => (e.x + 2.0, e.y + 2.0),
+                Some(e) => (e.right() + layout::GUT_X, e.y),
+                None => match self.doc.bounds() {
+                    Some((bx, _, _, bb)) => (bx, bb + layout::GUT_Y),
+                    None => (self.camera.0 + 2.0, self.camera.1 + 2.0),
+                },
             },
         };
         for col in 0..8 {
@@ -1556,11 +1594,23 @@ impl App {
         }
     }
 
+    /// `ids` and every relation between two of them — what a copy, a cut or a delete all
+    /// mean by "this set": the pieces that can come back as a whole through `p`, since a
+    /// relation with one end outside `ids` would paste in dangling.
+    fn clip_of(&self, ids: &[ElementId]) -> (Vec<Element>, Vec<Relation>) {
+        let elements: Vec<Element> = self.doc.elements.iter().filter(|e| ids.contains(&e.id)).cloned().collect();
+        let relations: Vec<Relation> = self.doc.relations.iter().filter(|r| ids.contains(&r.from) && ids.contains(&r.to)).cloned().collect();
+        (elements, relations)
+    }
+
+    /// `d`: a cut, not a plain delete — vim's own bargain, so the thing that just left is
+    /// one `p` away from coming back, the same register `y` fills.
     fn delete_element(&mut self, id: ElementId) {
         self.checkpoint();
+        self.clip = Some(self.clip_of(&[id]));
         self.doc.remove_element(id);
         self.after_document_change();
-        self.say("deleted", Tone::Note);
+        self.say("deleted — p brings it back", Tone::Note);
     }
 
     fn delete_picked(&mut self) {
@@ -1568,12 +1618,14 @@ impl App {
             return;
         }
         self.checkpoint();
-        for id in std::mem::take(&mut self.selection) {
+        let ids = std::mem::take(&mut self.selection);
+        self.clip = Some(self.clip_of(&ids));
+        for id in ids {
             self.doc.remove_element(id);
         }
         self.visual = false;
         self.after_document_change();
-        self.say("deleted", Tone::Note);
+        self.say("deleted — p brings it back", Tone::Note);
     }
 
     /// The elements a move applies to: the picked set, or the cursor's element and — for a
@@ -1745,9 +1797,7 @@ impl App {
         if ids.is_empty() {
             return;
         }
-        let elements: Vec<Element> = self.doc.elements.iter().filter(|e| ids.contains(&e.id)).cloned().collect();
-        let relations: Vec<Relation> =
-            self.doc.relations.iter().filter(|r| ids.contains(&r.from) && ids.contains(&r.to)).cloned().collect();
+        let (elements, relations) = self.clip_of(&ids);
         let n = elements.len();
         self.clip = Some((elements, relations));
         if self.visual {
@@ -1994,6 +2044,39 @@ impl App {
         }
     }
 
+    /// Bend mode's own keys — `i` already grabbed the turn and checkpointed once, so this
+    /// only ever slides `elbow`: hjkl (ctrl or shift for a bigger pull) in the direction the
+    /// route's own axis calls for, silently doing nothing for the other pair, the same as a
+    /// resize handle already ignores whichever axis it has no edge on. `enter`/`esc` let go.
+    fn bend_key(&mut self, k: KeyEvent) {
+        let Some(rid) = self.focused_relation() else {
+            self.bending = false;
+            return;
+        };
+        if matches!(k.code, KeyCode::Enter | KeyCode::Esc) {
+            self.bending = false;
+            return;
+        }
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let pull = match k.code {
+            KeyCode::Char('h') | KeyCode::Left => Some((true, -1.0, ctrl)),
+            KeyCode::Char('l') | KeyCode::Right => Some((true, 1.0, ctrl)),
+            KeyCode::Char('k') | KeyCode::Up => Some((false, -1.0, ctrl)),
+            KeyCode::Char('j') | KeyCode::Down => Some((false, 1.0, ctrl)),
+            KeyCode::Char('H') | KeyCode::Backspace => Some((true, -1.0, true)),
+            KeyCode::Char('L') => Some((true, 1.0, true)),
+            KeyCode::Char('K') => Some((false, -1.0, true)),
+            KeyCode::Char('J') => Some((false, 1.0, true)),
+            _ => None,
+        };
+        let Some((across, sign, big)) = pull else { return };
+        let Some(r) = self.doc.relation(rid) else { return };
+        if self.doc.bendable(r) == Some(across) {
+            let step = if big { BIG_STEP } else { 1.0 };
+            self.doc.bend(rid, sign * step);
+        }
+    }
+
     // ─── keys ───────────────────────────────────────────────────────────────
 
     pub fn on_key(&mut self, k: KeyEvent) {
@@ -2123,10 +2206,11 @@ impl App {
             return;
         }
         if let Some(st) = &mut self.ctxmenu {
+            let world = st.world;
             match st.key(k) {
                 ctxmenu::Outcome::Nothing => {}
                 ctxmenu::Outcome::Cancel => self.ctxmenu = None,
-                ctxmenu::Outcome::Run(cmd) => self.run_cmd(cmd, Avail::Yes),
+                ctxmenu::Outcome::Run(cmd) => self.run_menu_cmd(cmd, world),
             }
             return;
         }
@@ -2168,6 +2252,10 @@ impl App {
         }
         if self.props.is_some() {
             self.props_key(k);
+            return;
+        }
+        if self.grep.is_some() {
+            self.grep_key(k);
             return;
         }
         if self.workbench.is_some() {
@@ -2299,6 +2387,15 @@ impl App {
             }
             self.reshape_key(k, rs);
             self.follow_camera();
+            return;
+        }
+        if self.bending {
+            if k.code == KeyCode::Char(':') {
+                self.bending = false;
+                self.cmdline = Some(cmdline::State::new(':'));
+                return;
+            }
+            self.bend_key(k);
             return;
         }
         // Presenting draws nothing but the diagram, so the line and the menu bring the chrome
@@ -2481,7 +2578,15 @@ impl App {
                     }
                 }
             }
-            (_, KeyCode::Char('i')) => self.reshape = Some(Reshape { handle: 3, held: false, moving: None }),
+            (_, KeyCode::Char('i')) => match self.focused_relation() {
+                // Availability already refused this on a straight or curved route — gated
+                // in `keymap.rs`, not re-checked here.
+                Some(_) => {
+                    self.checkpoint();
+                    self.bending = true;
+                }
+                None => self.reshape = Some(Reshape { handle: 3, held: false, moving: None }),
+            },
             (_, KeyCode::Char('o')) => self.open_off(None),
             (_, KeyCode::Char('e')) => self.open_expand(),
             (_, KeyCode::Char('u')) => self.undo(),
@@ -2608,6 +2713,19 @@ impl App {
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
         self.last_mouse = debug::describe_mouse(&m);
+        // The context menu owns the mouse outright while it's up — hover and click drive it
+        // the way j/k/enter/esc do (`ctxmenu_mouse`), never the diagram underneath it.
+        if self.ctxmenu.is_some() {
+            self.ctxmenu_mouse(&m);
+            return;
+        }
+        // A click into the grid while the sheet has the keyboard closes it — the same as esc
+        // — and then falls straight through to act on the diagram, rather than the mouse
+        // going silently inert until a second click. `mouse_active` would otherwise refuse
+        // every click here, since the sheet was still focused when this one arrived.
+        if matches!(m.kind, MouseEventKind::Down(_)) && self.sheet.as_ref().is_some_and(|s| s.focused) && self.screen_to_world(m.column, m.row).is_some() {
+            self.sheet = None;
+        }
         if !self.mouse_active() {
             return;
         }
@@ -2619,19 +2737,19 @@ impl App {
                 let last = self.mouse_pos.unwrap_or((self.camera.0, self.camera.1));
                 match btn {
                     MouseButton::Left => self.mouse_left_up(last),
-                    MouseButton::Right => self.mouse_right_up(last),
+                    MouseButton::Right => self.mouse_right_up(last, (m.column, m.row)),
                     MouseButton::Middle => {}
                 }
             }
             return;
         };
         match m.kind {
-            MouseEventKind::Down(MouseButton::Left) => self.mouse_left_down(p),
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_left_down(p, m.modifiers.contains(KeyModifiers::CONTROL)),
             MouseEventKind::Drag(MouseButton::Left) => self.mouse_left_drag(p),
             MouseEventKind::Up(MouseButton::Left) => self.mouse_left_up(p),
             MouseEventKind::Down(MouseButton::Right) => self.mouse_right_down(p, (m.column, m.row)),
             MouseEventKind::Drag(MouseButton::Right) => self.mouse_right_drag(p, (m.column, m.row)),
-            MouseEventKind::Up(MouseButton::Right) => self.mouse_right_up(p),
+            MouseEventKind::Up(MouseButton::Right) => self.mouse_right_up(p, (m.column, m.row)),
             MouseEventKind::Moved => self.hover = self.doc.element_near(p, ARROW_MARGIN),
             MouseEventKind::ScrollUp => self.pan(0.0, -PAN_Y),
             MouseEventKind::ScrollDown => self.pan(0.0, PAN_Y),
@@ -2643,7 +2761,27 @@ impl App {
         self.follow_camera();
     }
 
-    fn mouse_left_down(&mut self, p: (f64, f64)) {
+    /// Mouse behaviour while the context menu is open — hover moves `sel` the way `j`/`k`
+    /// would, a left click on a row is `enter`, and a click anywhere else (or any other
+    /// button) is `esc`, the way clicking off any dropdown dismisses it.
+    fn ctxmenu_mouse(&mut self, m: &MouseEvent) {
+        let Some(st) = &mut self.ctxmenu else { return };
+        let area = st.area(self.body);
+        let hit = st.row_at(area, m.column, m.row);
+        match (m.kind, hit) {
+            (MouseEventKind::Moved, Some(i)) => st.sel = i,
+            (MouseEventKind::Moved, None) => {}
+            (MouseEventKind::Down(MouseButton::Left), Some(i)) => {
+                let (cmd, world) = (st.rows[i].cmd, st.world);
+                self.ctxmenu = None;
+                self.run_menu_cmd(cmd, world);
+            }
+            (MouseEventKind::Down(_), _) => self.ctxmenu = None,
+            _ => {}
+        }
+    }
+
+    fn mouse_left_down(&mut self, p: (f64, f64), ctrl: bool) {
         self.status = None;
         self.mouse_dragging = false;
         // Checked before `hit_handle`: `arrow_region` only answers outside the box itself,
@@ -2657,6 +2795,12 @@ impl App {
         }
         if let Some((id, handle)) = self.hit_handle(p) {
             self.set_cursor(id);
+            // Ctrl on a handle draws a relation instead of reshaping — a node is the one
+            // place dragging was ever ambiguous, so it's the one place a modifier decides.
+            if ctrl {
+                self.mouse_gesture = Some(MouseGesture::Relate(id));
+                return;
+            }
             match self.doc.at_port(id, handle).first().copied() {
                 Some(rid) => {
                     let is_from = self.doc.relation(rid).is_some_and(|r| r.from == id);
@@ -2680,6 +2824,8 @@ impl App {
                 self.selection.clear();
             }
             self.set_cursor(id);
+            // The body only ever moves — there was never a reason to guess at a relation
+            // from a plain drag here; that's what dragging a handle, with ctrl, is for.
             let ids: Vec<ElementId> = self.movable().into_iter().filter(|i| !self.doc.element_locked(*i)).collect();
             self.mouse_gesture = Some(MouseGesture::Body(ids));
             return;
@@ -2705,6 +2851,14 @@ impl App {
                     self.checkpoint();
                 }
                 self.move_elements(&ids, dx, dy);
+            }
+            Some(MouseGesture::Relate(from)) => {
+                // Set here, not at `Down`: a click that never turns into a drag never enters
+                // "holding" at all, so it carries none of that state's visual weight.
+                if self.holding.is_none() {
+                    self.holding = Some(from);
+                }
+                self.cursor = Some(self.doc.element_at(p).unwrap_or(from));
             }
             Some(MouseGesture::Handle) => {
                 let Some(rs) = self.reshape else { return };
@@ -2734,6 +2888,17 @@ impl App {
     fn mouse_left_up(&mut self, p: (f64, f64)) {
         if self.mouse_dragging {
             match self.mouse_gesture.take() {
+                Some(MouseGesture::Relate(from)) => {
+                    // The same drop as the mouse's right-drag and the keyboard's own
+                    // hold-and-carry: let go over nothing (or back on where it started) and
+                    // the preview just disappears — nothing else has changed.
+                    let to = self.cursor.unwrap_or(from);
+                    if to != from {
+                        self.drop_relation();
+                    } else {
+                        self.holding = None;
+                    }
+                }
                 Some(MouseGesture::Handle) => {
                     // A mouse handle-drag is a one-shot gesture — it ends when the button
                     // comes up, unlike keyboard's sticky Reshape mode, which needs a second
@@ -2813,7 +2978,7 @@ impl App {
     /// right-click, nothing above it to bail out of) it opens the context menu: whatever is
     /// selected stays selected, since acting on the current pick is often the whole point of
     /// asking for a menu — esc is still how to clear a selection outright.
-    fn mouse_right_up(&mut self, _p: (f64, f64)) {
+    fn mouse_right_up(&mut self, p: (f64, f64), raw: (u16, u16)) {
         let panned = self.mouse_dragging && self.pan_from.is_some();
         let attempted = self.mouse_dragging && self.holding.is_some();
         if panned {
@@ -2831,10 +2996,19 @@ impl App {
         } else if self.holding.is_some() {
             self.holding = None;
         } else if !self.mouse_dragging {
-            if let Some(id) = self.connect_from {
-                self.set_cursor(id);
+            // What the menu is *about* — an element, a relation (focused properly, the same
+            // as a left-click would), or, on empty ground, nothing: cleared rather than left
+            // wherever the cursor happened to be, or the menu would open on a shape that
+            // isn't the one just clicked. The current pick/selection is untouched regardless —
+            // acting on it is often the whole reason for asking.
+            match self.connect_from {
+                Some(id) => self.set_cursor(id),
+                None => match self.doc.relation_at(p, RELATION_HIT) {
+                    Some(rid) => self.land_on_relation(rid, p),
+                    None => self.cursor = None,
+                },
             }
-            self.ctxmenu = Some(ctxmenu::State::new(&self.whereami()));
+            self.ctxmenu = Some(ctxmenu::State::new(&self.whereami(), raw, p));
         }
         self.connect_from = None;
         self.pan_from = None;
@@ -3314,6 +3488,34 @@ impl App {
             return;
         }
 
+        if st.filtering {
+            match k.code {
+                KeyCode::Backspace => st.retype(|f| {
+                    f.pop();
+                }),
+                KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => st.retype(|f| f.push(c)),
+                KeyCode::Esc => {
+                    st.filter.clear();
+                    st.filtering = false;
+                    st.sel = 0;
+                }
+                KeyCode::Enter => st.filtering = false,
+                _ => {}
+            }
+            return;
+        }
+
+        // A bare `g` arms the grep chord; consumed by the very next key regardless of what
+        // it is — an unmatched one (anything but `/`) just drops it, the same as the main
+        // canvas dispatcher's own prefixes do with a key that names nothing.
+        if st.pending_g {
+            st.pending_g = false;
+            if k.code == KeyCode::Char('/') {
+                self.open_grep();
+            }
+            return;
+        }
+
         let sel = st.selected(self.registry.as_ref());
         // Real filesystem CRUD only makes sense on a real filesystem row, or on nothing at
         // all (create lands in the root then) — never on the virtual elements section.
@@ -3321,7 +3523,16 @@ impl App {
         let not_here = "elements are read from the diagrams themselves — edit it there";
         match k.code {
             KeyCode::Esc if st.grabbed.is_some() => st.grabbed = None,
+            // A search left narrowing the tree clears before esc closes the panel outright —
+            // the same two-stage esc `grabbed` already gets, since both are "back off one
+            // step" states a bare esc should unwind before it means "leave".
+            KeyCode::Esc if !st.filter.is_empty() => {
+                st.filter.clear();
+                st.sel = 0;
+            }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('W') => self.workbench = None,
+            KeyCode::Char('/') => st.filtering = true,
+            KeyCode::Char('g') => st.pending_g = true,
             KeyCode::Char(':') => {
                 self.workbench = None;
                 self.cmdline = Some(cmdline::State::new(':'));
@@ -3391,6 +3602,41 @@ impl App {
                 Some(workbench::DisplayRow::Fs(row)) => self.confirm = Some(Confirm::DeleteWorkbenchEntry(row.entry())),
                 _ => self.say(not_here, Tone::Bad),
             },
+            _ => {}
+        }
+    }
+
+    /// `g/` in the workbench — opens the content grep on top of it.
+    fn open_grep(&mut self) {
+        self.grep = Some(grep::State::new());
+    }
+
+    /// The content grep's own keys — a query and a flat list of `(entry, file)` hits; `enter`
+    /// on one opens that file and drops both the search and the workbench underneath it, the
+    /// same "go look at it now" `workbench_key`'s own `enter` on a diagram already does.
+    fn grep_key(&mut self, k: KeyEvent) {
+        let Some(st) = &mut self.grep else { return };
+        let n = self.registry.as_ref().map_or(0, |r| grep::results(&st.query, r).len());
+        // Extracted before the match rather than read from `st` inside `Enter`'s own arm — a
+        // borrow of `self.grep` alive there would refuse the `self.workbench_open_diagram`
+        // call below it needs.
+        let (query, sel) = (st.query.clone(), st.sel);
+        match k.code {
+            KeyCode::Esc => self.grep = None,
+            KeyCode::Backspace => st.retype(|q| {
+                q.pop();
+            }),
+            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => st.retype(|q| q.push(c)),
+            KeyCode::Up => st.move_by(-1, n),
+            KeyCode::Down => st.move_by(1, n),
+            KeyCode::Enter => {
+                let path = self.registry.as_ref().and_then(|reg| grep::results(&query, reg).into_iter().nth(sel)).map(|h| h.path);
+                if let Some(path) = path {
+                    self.grep = None;
+                    self.workbench = None;
+                    self.workbench_open_diagram(path);
+                }
+            }
             _ => {}
         }
     }
@@ -3637,7 +3883,10 @@ impl App {
             return;
         }
         match k.code {
-            KeyCode::Esc => sh.focused = false,
+            // Esc closes it outright, the same as q — a sheet left open but unfocused was a
+            // state the keyboard could reach but the mouse could not equally back out of, and
+            // that mismatch is what made it look like the diagram had lost the shapes on it.
+            KeyCode::Esc => self.sheet = None,
             KeyCode::Char('q') => self.sheet = None,
             KeyCode::Char(':') => {
                 sh.focused = false;
@@ -3867,6 +4116,16 @@ impl App {
         }
     }
 
+    /// A context-menu row, replayed: `a` and `p` remember where the menu was opened, so they
+    /// land there instead of `free_spot`'s cursor/bounds guess. Everything else is just
+    /// `run_cmd` — the menu doesn't otherwise know or care what a row does.
+    fn run_menu_cmd(&mut self, cmd: &'static keymap::Cmd, at: (f64, f64)) {
+        if matches!(cmd.keys, "a" | "p") {
+            self.pending_add_at = Some(at);
+        }
+        self.run_cmd(cmd, Avail::Yes);
+    }
+
     fn palette_key(&mut self, k: KeyEvent) {
         let Some(p) = &mut self.palette else { return };
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -3894,6 +4153,7 @@ impl App {
             KeyCode::Esc => {
                 self.palette = None;
                 self.pending_port = None;
+                self.pending_add_at = None;
             }
             KeyCode::Down | KeyCode::Tab => p.move_by(1),
             KeyCode::Up | KeyCode::BackTab => p.move_by(-1),
@@ -4574,6 +4834,10 @@ impl App {
             let area = Rect { x: full0.x, y: full.y, width: left_width, height: full.height };
             f.render_widget(workbench::Browser { state: st, registry: self.registry.as_ref() }, area);
         }
+        if let Some(st) = &self.grep {
+            let area = chrome::centered(body, grep::WIDTH.max(48), grep::height(body.height));
+            f.render_widget(grep::Browser { state: st, registry: self.registry.as_ref() }, area);
+        }
         let layers_h = self.layers.as_ref().map_or(0, |_| (self.doc.layers.len() as u16 + 6).min(full.height));
         let props_h = self.props.as_ref().map_or(0, |p| props::height(self.doc.element(p.target).map_or(0, |e| e.properties.len()), full.height.saturating_sub(layers_h)));
         let browser_h = layers_h + props_h;
@@ -4628,7 +4892,7 @@ impl App {
             f.render_widget(conflictpick::Dialog { state: d }, area);
         }
         if let Some(d) = &self.ctxmenu {
-            let area = chrome::centered(body, ctxmenu::WIDTH, ctxmenu::height(d.rows.len()));
+            let area = d.area(body);
             f.render_widget(ctxmenu::Dialog { state: d }, area);
         }
         if self.debug {
@@ -4869,6 +5133,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ElementInk;
     use crate::model::Node as LinkNode;
     use crate::ontology::ShapeKind::*;
     use crate::ontology::{End, LineStyle};
@@ -4927,6 +5192,15 @@ mod tests {
         mouse(a, MouseEventKind::Down(btn), from);
         mouse(a, MouseEventKind::Drag(btn), to);
         mouse(a, MouseEventKind::Up(btn), to);
+    }
+
+    /// A left-drag with ctrl held — the escape hatch back to moving a shape's body, since a
+    /// plain one now draws a relation instead.
+    fn ctrl_drag(a: &mut App, from: (f64, f64), to: (f64, f64)) {
+        let ev = |kind, p: (f64, f64)| MouseEvent { kind, column: p.0 as u16, row: p.1 as u16, modifiers: KeyModifiers::CONTROL };
+        a.on_mouse(ev(MouseEventKind::Down(MouseButton::Left), from));
+        a.on_mouse(ev(MouseEventKind::Drag(MouseButton::Left), to));
+        a.on_mouse(ev(MouseEventKind::Up(MouseButton::Left), to));
     }
 
     #[test]
@@ -5159,6 +5433,30 @@ mod tests {
         assert_eq!(a.focus, 0);
         press(&mut a, "u");
         assert_eq!(a.doc.relations.len(), 1, "undo brings it back");
+    }
+
+    #[test]
+    fn bend_mode_pulls_a_line_along_its_own_axis_ignores_the_other_and_is_one_undo_step() {
+        let mut a = app();
+        let (x, y) = two(&mut a);
+        // Side by side (same y): the route leaves across, so only h/l should do anything.
+        let r = a.doc.connect(RelationKind::Realization, x, y).unwrap();
+        key(&mut a, KeyCode::Tab);
+        assert_eq!(a.focused_relation(), Some(r));
+        assert_eq!(a.doc.relation(r).unwrap().elbow, None);
+
+        press(&mut a, "i");
+        assert!(a.bending, "i grabs the line's one turn");
+        press(&mut a, "kkjj");
+        assert_eq!(a.doc.relation(r).unwrap().elbow, None, "up/down does nothing on a side-to-side line");
+        press(&mut a, "ll");
+        let pulled = a.doc.relation(r).unwrap().elbow;
+        assert!(pulled.is_some(), "left/right does");
+        key(&mut a, KeyCode::Enter);
+        assert!(!a.bending, "enter lets go");
+
+        press(&mut a, "u");
+        assert_eq!(a.doc.relation(r).unwrap().elbow, None, "the whole drag, however many pulls, is one undo step");
     }
 
     #[test]
@@ -5569,6 +5867,73 @@ mod tests {
         assert!(a.doc.elements.iter().any(|e| e.display() == "Asset Location" && e.kind == ShapeKind::ObjectType));
         assert_eq!(a.doc.relations.len(), 1);
         assert_eq!(a.doc.relations[0].kind, RelationKind::LinkType);
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn a_search_narrows_the_workbench_and_esc_backs_off_one_step_at_a_time() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-wbsearch-config-{}", std::process::id()));
+        let _config_home = isolated_config_home(&config_dir);
+        let root = std::env::temp_dir().join(format!("vim-shapes-wbsearch-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("Billing")).unwrap();
+        persistence::save(&Workspace::single("t".into(), crate::model::Document::default()), &root.join("Billing").join("invoice.json")).unwrap();
+        persistence::save(&Workspace::single("t".into(), crate::model::Document::default()), &root.join("readme.json")).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        let before = a.workbench.as_ref().unwrap().display_rows(a.registry.as_ref()).len();
+        assert_eq!(before, 2, "Billing folded to one row, plus the top-level diagram");
+
+        press(&mut a, "/invoice");
+        key(&mut a, KeyCode::Enter);
+        let rows = a.workbench.as_ref().unwrap().display_rows(a.registry.as_ref());
+        assert_eq!(rows.len(), 2, "Billing forced open on the way to the match, plus the match itself — readme.json drops out");
+        assert!(rows.iter().any(|r| matches!(r, workbench::DisplayRow::Fs(row) if row.name == "invoice.json")));
+
+        key(&mut a, KeyCode::Esc);
+        assert!(a.workbench.is_some(), "esc clears the filter first");
+        assert!(a.workbench.as_ref().unwrap().filter.is_empty());
+        key(&mut a, KeyCode::Esc);
+        assert!(a.workbench.is_none(), "esc with nothing left to clear closes the panel");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    #[test]
+    fn grep_searches_every_diagram_s_contents_not_just_names_on_screen_and_opens_a_hit() {
+        let config_dir = std::env::temp_dir().join(format!("vim-shapes-grep-config-{}", std::process::id()));
+        let _config_home = isolated_config_home(&config_dir);
+        let root = std::env::temp_dir().join(format!("vim-shapes-grep-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Two files sharing one real element (same api_name), neither named anything close to
+        // the query below — grep has to find it by what is drawn inside, not a row's name.
+        let mut a_doc = crate::model::Document::default();
+        let id = a_doc.add(ShapeKind::ObjectType, "Customer", 0.0, 0.0);
+        a_doc.element_mut(id).unwrap().api_name = Some("customer".into());
+        persistence::save(&Workspace::single("t".into(), a_doc), &root.join("a.json")).unwrap();
+        let mut b_doc = crate::model::Document::default();
+        let id2 = b_doc.add(ShapeKind::ObjectType, "Customer", 0.0, 0.0);
+        b_doc.element_mut(id2).unwrap().api_name = Some("customer".into());
+        persistence::save(&Workspace::single("t".into(), b_doc), &root.join("unrelated_name.json")).unwrap();
+
+        let mut a = app();
+        a.run_excmd(format!("workbench {}", root.display()));
+        assert!(a.workbench.is_some());
+
+        press(&mut a, "g/customer");
+        assert!(a.grep.is_some(), "g/ opens the content grep");
+        assert!(a.workbench.is_some(), "the workbench stays open underneath it");
+
+        key(&mut a, KeyCode::Enter);
+        assert!(a.grep.is_none(), "picking a hit closes the search");
+        assert!(a.workbench.is_none(), "and the workbench it was searching");
+        assert_eq!(a.tab_name(), "a", "the first of the two files this one shape is seen in");
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&config_dir).ok();
@@ -6509,12 +6874,11 @@ mod tests {
         assert_eq!(a.sheet.as_ref().unwrap().field().unwrap().value, bg.hex());
         // A colour picked on a shape goes the same way, and the recent row offers it.
         key(&mut a, KeyCode::Esc);
+        assert!(a.sheet.is_none(), "esc closes the pinned sheet too");
         press(&mut a, "u");
         assert_eq!(a.doc.metadata.page.background, None, "one undo step");
-        term.draw(|f| a.draw(f)).unwrap();
-        assert!(!a.sheet.as_ref().unwrap().pinned, "esc lets the sheet follow the cursor again");
-        assert_eq!(a.sheet.as_ref().unwrap().target, Some(Target::Element(x)));
         press(&mut a, "c");
+        assert_eq!(a.sheet.as_ref().unwrap().target, Some(Target::Element(x)), "opens fresh, on the cursor's shape");
         press(&mut a, "jjj");
         assert_eq!(a.sheet.as_ref().unwrap().field().unwrap().name, "colour");
         key(&mut a, KeyCode::Enter);
@@ -6586,9 +6950,13 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_on_a_fill_calls_blank_auto_and_a_look_dresses_the_shape() {
+    fn the_picker_on_a_sketch_shapes_fill_calls_blank_auto_and_a_look_dresses_it() {
+        // Look and an arbitrary fill colour are a sketch shape's own — an architecture
+        // shape's fill is a switch (see `an_architecture_shapes_fill_is_a_switch_not_a_look`):
+        // its colour already says which layer it's in.
         let mut a = app();
-        let (x, _) = two(&mut a);
+        let x = a.doc.add(ShapeKind::Box, "note", 2.0, 2.0);
+        a.set_cursor(x);
         press(&mut a, "c");
         press(&mut a, "j");
         assert_eq!(a.sheet.as_ref().unwrap().field().unwrap().name, "fill");
@@ -6613,6 +6981,28 @@ mod tests {
         // The inside of a filled shape is tinted: a cell inside it is not the ground.
         let inside = &buf[((e.x + 2.0) as u16, (e.y + 2.0) as u16 + 1)];
         assert!(matches!(inside.bg, Color::Rgb(..)), "tinted inside: {:?}", inside.bg);
+    }
+
+    #[test]
+    fn an_architecture_shapes_fill_is_a_switch_not_a_look() {
+        // Its colour already says which layer it's in — enter opens no picker, h/l only
+        // ever lands on auto or none, and look (a fill-and-line pair) is refused outright.
+        let mut a = app();
+        let (x, _) = two(&mut a);
+        press(&mut a, "c");
+        press(&mut a, "j");
+        assert_eq!(a.sheet.as_ref().unwrap().field().unwrap().name, "fill");
+        assert_eq!(a.doc.element(x).unwrap().fill, crate::model::Fill::Auto);
+        key(&mut a, KeyCode::Enter);
+        assert!(a.colour.is_none(), "no colour picker on an architecture shape's fill");
+        key(&mut a, KeyCode::Esc);
+        press(&mut a, "l");
+        assert_eq!(a.doc.element(x).unwrap().fill, crate::model::Fill::None, "l toggles to none, not a colour");
+        press(&mut a, "l");
+        assert_eq!(a.doc.element(x).unwrap().fill, crate::model::Fill::Auto, "and back — only the two");
+        press(&mut a, "k");
+        press(&mut a, "l");
+        assert_eq!(a.doc.element(x).unwrap().look(), "custom", "look on an architecture shape is refused, and stays custom");
     }
 
     #[test]
@@ -6702,28 +7092,48 @@ mod tests {
         press(&mut a, " v2");
         key(&mut a, KeyCode::Esc);
         assert_eq!(a.doc.element(x).unwrap().label, "CRM v2");
-        // esc gives the keyboard back; the sheet stays and follows the cursor.
+        // esc closes it outright — the same as q.
         key(&mut a, KeyCode::Esc);
-        assert!(a.sheet.as_ref().is_some_and(|s| !s.focused));
+        assert!(a.sheet.is_none());
         assert_eq!(a.whereami().mode, Mode::Normal);
         press(&mut a, "l");
+        press(&mut a, "c");
+        assert!(a.sheet.as_ref().is_some_and(|s| s.focused), "opens fresh, on whatever the cursor is on now");
         use ratatui::{backend::TestBackend, Terminal};
         let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
         term.draw(|f| a.draw(f)).unwrap();
         let sh = a.sheet.as_ref().unwrap();
-        assert_eq!(sh.target, Some(Target::Element(1)), "followed the cursor to the second shape");
-        assert_eq!(sh.tab, form::Tab::Text, "…keeping the tab");
+        assert_eq!(sh.target, Some(Target::Element(1)), "the second shape, where the cursor now is");
         let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(out.contains("Contacts API") && out.contains("arrange"), "docked, with its tabs: {out}");
+        assert!(out.contains("Contacts API") && out.contains("look"), "docked, with its tabs: {out}");
         assert_eq!(a.view_size.0, 120 - sheet::WIDTH, "the diagram gave the sheet its columns");
-        // c re-enters; q closes.
-        press(&mut a, "c");
-        assert!(a.sheet.as_ref().is_some_and(|s| s.focused));
+        // q closes it too.
         press(&mut a, "q");
         assert!(a.sheet.is_none());
         press(&mut a, "uuu");
         let e = a.doc.element(x).unwrap();
         assert_eq!((e.w, e.kind, e.label.as_str()), (16.0, ShapeKind::ApplicationComponent, "CRM"), "one undo step per field");
+    }
+
+    #[test]
+    fn a_click_into_the_grid_closes_the_sheet_the_same_as_esc_and_still_acts_on_the_diagram() {
+        let mut a = app();
+        let (_, y) = two(&mut a);
+        press(&mut a, "c");
+        assert!(a.sheet.as_ref().is_some_and(|s| s.focused));
+        // Empty grid, well clear of both shapes: the mouse was inert here before — the click
+        // closes the sheet, and there is nothing else at that point to act on.
+        click(&mut a, MouseButton::Left, (60.0, 20.0));
+        assert!(a.sheet.is_none(), "the click closed it");
+        assert_eq!(a.cursor, None, "empty grid deselects, same as any other click there");
+        // The same click, landing on a shape this time, both closes the sheet and moves the
+        // cursor there in one gesture — it is not eaten just because the sheet had the keys.
+        press(&mut a, "c");
+        assert!(a.sheet.as_ref().is_some_and(|s| s.focused));
+        let ey = a.doc.element(y).unwrap().clone();
+        click(&mut a, MouseButton::Left, (ey.x + 2.0, ey.y + 1.0));
+        assert!(a.sheet.is_none());
+        assert_eq!(a.cursor, Some(y), "the click also landed on the diagram");
     }
 
     #[test]
@@ -6750,10 +7160,17 @@ mod tests {
         press(&mut a, "h");
         assert_eq!(a.doc.element(x).unwrap().w, 4.0);
         key(&mut a, KeyCode::Esc);
+        assert!(a.sheet.is_none(), "esc closes it — a fresh c starts over on the style tab");
         press(&mut a, "u");
         assert_eq!(a.doc.element(x).unwrap().w, w + 2.0, "each step is one undo — the refused one left none");
         // H/L: ten at a time, one undo, and a big step stops at the limit rather than short of it.
         press(&mut a, "c");
+        while a.sheet.as_ref().unwrap().tab != form::Tab::Arrange {
+            key(&mut a, KeyCode::Tab);
+        }
+        while a.sheet.as_ref().unwrap().field().unwrap().name != "width" {
+            press(&mut a, "j");
+        }
         press(&mut a, "L");
         assert_eq!(a.doc.element(x).unwrap().w, w + 12.0);
         a.doc.element_mut(x).unwrap().w = 7.0;
@@ -6761,10 +7178,14 @@ mod tests {
         press(&mut a, "H");
         assert_eq!(a.doc.element(x).unwrap().w, 4.0, "7 less ten stops at width's floor of 4");
         key(&mut a, KeyCode::Esc);
+        assert!(a.sheet.is_none());
         press(&mut a, "u");
         assert_eq!(a.doc.element(x).unwrap().w, 7.0, "the whole big step is one undo");
         // On a choice, H/L are h/l: one along.
         press(&mut a, "c");
+        while a.sheet.as_ref().unwrap().tab != form::Tab::Arrange {
+            key(&mut a, KeyCode::Tab);
+        }
         while a.sheet.as_ref().unwrap().field().unwrap().name != "kind" {
             press(&mut a, "k");
         }
@@ -7427,6 +7848,7 @@ mod tests {
         key(&mut a, KeyCode::Enter);
         assert!([x, y].iter().all(|&id| a.doc.element(id).unwrap().label == "same"));
         key(&mut a, KeyCode::Esc);
+        assert!(a.sheet.is_none(), "esc closes the picked set's sheet too");
         press(&mut a, "u");
         assert_eq!(a.doc.element(x).unwrap().label, "CRM", "one undo step for the set — last key: {}", a.last_resolved);
         assert_eq!(a.whereami().mode, Mode::Visual, "still picking");
@@ -7434,7 +7856,7 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
         term.draw(|f| a.draw(f)).unwrap();
         let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(out.contains("2 shapes picked") && out.contains("mixed"), "{out}");
+        assert!(out.contains("2 picked"), "{out}");
         // HJKL move the set; the relation to the unpicked shape follows its moved end.
         let before = a.doc.end_points(a.doc.relation(r).unwrap()).unwrap();
         press(&mut a, "J");
@@ -7689,6 +8111,43 @@ mod tests {
     }
 
     #[test]
+    fn an_element_s_own_ink_overrides_the_document_s_but_never_a_relation_or_a_handle() {
+        let dir = std::env::temp_dir().join(format!("vim-shapes-element-ink-{}", std::process::id()));
+        let _config_home = isolated_config_home(&dir);
+        let mut a = app();
+        let (x, y) = two(&mut a);
+        a.doc.connect(RelationKind::Serving, x, y).ok();
+        a.run_excmd("ink lines".into());
+        press(&mut a, "c");
+        press(&mut a, "jjjjjjj");
+        assert_eq!(a.sheet.as_ref().unwrap().field().unwrap().name, "ink", "look, fill, outline, colour, line, stroke, opacity, ink");
+        press(&mut a, "ll");
+        assert_eq!(a.doc.element(x).unwrap().ink, ElementInk::Braille, "auto, then lines, then braille");
+
+        let box_drawing = |out: &str| out.chars().any(|ch| "─│┌┐└┘╭╮╰╯".contains(ch));
+        let braille = |out: &str| out.chars().any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch));
+
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(box_drawing(&out), "y — outside the override — is still lines: {out}");
+        assert!(braille(&out), "x's own override draws its outline in braille: {out}");
+
+        // The reverse: a braille document, one element overridden back to lines.
+        a.run_excmd("ink braille".into());
+        press(&mut a, "ll");
+        assert_eq!(a.doc.element(x).unwrap().ink, ElementInk::Lines, "braille, wraps to auto, then lines");
+        term.draw(|f| a.draw(f)).unwrap();
+        let out: String = term.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(braille(&out), "y, and the document, are still braille: {out}");
+        assert!(box_drawing(&out), "x's own override draws its outline in lines: {out}");
+
+        a.run_excmd("ink lines".into());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn g_wraps_a_picked_set_gp_goes_up_to_it_and_gu_dissolves_it() {
         let mut a = app();
         let (x, y) = two(&mut a);
@@ -7819,13 +8278,35 @@ mod tests {
     }
 
     #[test]
-    fn a_left_drag_on_a_body_moves_it_as_one_undo_step() {
+    fn a_left_drag_on_a_body_always_moves_it_as_one_undo_step() {
         let mut a = app();
         let (x, _y) = two(&mut a);
         drag(&mut a, MouseButton::Left, (10.0, 4.0), (14.0, 4.0));
         let e = a.doc.element(x).unwrap();
         assert_eq!((e.x, e.y), (6.0, 2.0), "moved by the drag's delta");
         assert_eq!(a.undo.len(), 1, "one undo step for the whole drag, not one per event");
+        // Ctrl on the body is no different — there was never an ambiguity here to resolve.
+        ctrl_drag(&mut a, (12.0, 3.0), (16.0, 3.0));
+        assert_eq!((a.doc.element(x).unwrap().x, a.doc.element(x).unwrap().y), (10.0, 2.0), "moved just the same, ctrl or not");
+    }
+
+    #[test]
+    fn a_ctrl_drag_on_a_handle_draws_a_relation_instead_of_resizing_and_a_release_over_nothing_drops_it() {
+        let mut a = app();
+        let (x, y) = two(&mut a);
+        let before = a.doc.element(x).unwrap().clone();
+        // Dropped over another element: the same picker a keyboard hold-and-carry would open.
+        ctrl_drag(&mut a, (18.0, 2.0), (38.0, 4.0));
+        assert!(a.relpick.is_some(), "landed on y — opens the picker, same as a right-drag");
+        assert_eq!(a.holding, Some(x));
+        assert_eq!(a.doc.element(x).unwrap(), &before, "ctrl on the handle never resized it");
+        a.relpick = None;
+        a.holding = None;
+        // Dropped over nothing: it just disappears — nothing resized either.
+        ctrl_drag(&mut a, (18.0, 2.0), (10.0, 40.0));
+        assert!(a.holding.is_none(), "let go of nothing, cleanly");
+        assert_eq!(a.doc.element(x).unwrap(), &before, "still never resized");
+        let _ = y;
     }
 
     #[test]
@@ -7887,6 +8368,84 @@ mod tests {
     }
 
     #[test]
+    fn a_right_click_on_empty_grid_clears_the_stale_cursor_and_offers_add_and_paste() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        a.set_cursor(x);
+        click(&mut a, MouseButton::Right, (60.0, 20.0));
+        assert_eq!(a.cursor, None, "the click landed on nothing, not on whatever the cursor was before");
+        let rows: Vec<&str> = a.ctxmenu.as_ref().unwrap().rows.iter().map(|r| r.cmd.keys).collect();
+        assert!(rows.contains(&"a"), "add shape is always on offer: {rows:?}");
+        assert!(!rows.contains(&"p"), "nothing copied yet: {rows:?}");
+        assert!(!rows.contains(&"d"), "nothing under the cursor to delete: {rows:?}");
+        a.ctxmenu = None;
+        a.set_cursor(x);
+        press(&mut a, "y");
+        click(&mut a, MouseButton::Right, (60.0, 20.0));
+        let rows: Vec<&str> = a.ctxmenu.as_ref().unwrap().rows.iter().map(|r| r.cmd.keys).collect();
+        assert!(rows.contains(&"p"), "copied something in the meantime: {rows:?}");
+    }
+
+    #[test]
+    fn a_right_click_on_a_relation_focuses_it_instead_of_leaving_a_stale_cursor() {
+        let mut a = app();
+        let (x, y) = two(&mut a);
+        a.doc.connect(RelationKind::Serving, x, y).unwrap();
+        // Cursor on some unrelated shape when the click lands on the line between x and y.
+        a.set_cursor(x);
+        let mid = a.doc.route(&a.doc.relations[0].clone()).map(|r| r[r.len() / 2]).unwrap();
+        click(&mut a, MouseButton::Right, mid);
+        assert!(a.focused_relation().is_some(), "landed on the relation, focused, not a stale element cursor");
+        let rows: Vec<&str> = a.ctxmenu.as_ref().unwrap().rows.iter().map(|r| r.cmd.keys).collect();
+        assert!(rows.contains(&"x"), "a relation's own actions, not the element's: {rows:?}");
+        assert!(!rows.contains(&"d"), "d deletes an element, not a relation: {rows:?}");
+    }
+
+    #[test]
+    fn adding_or_pasting_from_the_context_menu_lands_at_the_click_not_beside_the_cursor() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        a.set_cursor(x);
+        click(&mut a, MouseButton::Right, (60.0, 20.0));
+        let i = a.ctxmenu.as_ref().unwrap().rows.iter().position(|r| r.cmd.keys == "a").expect("add is always on offer");
+        a.ctxmenu.as_mut().unwrap().sel = i;
+        key(&mut a, KeyCode::Enter);
+        press(&mut a, "box");
+        key(&mut a, KeyCode::Enter);
+        let e = a.doc.elements.last().unwrap();
+        assert!((e.x - 60.0).abs() < 4.0 && (e.y - 20.0).abs() < 4.0, "landed near the click, not beside x at (2, 2): ({}, {})", e.x, e.y);
+        key(&mut a, KeyCode::Esc); // leave the new box's label, still typing after add_kind
+        press(&mut a, "y"); // copy the shape just added
+        // The camera followed the cursor to the box just added, so screen and world points no
+        // longer coincide the way they did at the start — read the click's own world point
+        // back off the menu it opened, the same value `pending_add_at` will use.
+        click(&mut a, MouseButton::Right, (50.0, 5.0));
+        let (wx, wy) = a.ctxmenu.as_ref().unwrap().world;
+        let i = a.ctxmenu.as_ref().unwrap().rows.iter().position(|r| r.cmd.keys == "p").expect("something was just copied");
+        a.ctxmenu.as_mut().unwrap().sel = i;
+        key(&mut a, KeyCode::Enter);
+        let pasted = a.doc.elements.last().unwrap();
+        assert!((pasted.x - wx).abs() < 4.0 && (pasted.y - wy).abs() < 4.0, "pasted near the click too: ({}, {})", pasted.x, pasted.y);
+    }
+
+    #[test]
+    fn the_context_menu_s_top_left_lands_exactly_on_the_mouse_when_there_is_room() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        a.set_cursor(x);
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        click(&mut a, MouseButton::Right, (5.0, 5.0));
+        term.draw(|f| a.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        // The panel's title strip is the accent-coloured bar `panel` paints across the whole
+        // top row of the box — the cell right at the click has to be part of it.
+        let accent = theme::t().sand;
+        assert_eq!(buf[(5, 5)].bg, accent, "the menu's own top-left cell is right at the click");
+    }
+
+    #[test]
     fn the_context_menu_runs_a_row_by_replaying_its_keys() {
         let mut a = app();
         let (x, _y) = two(&mut a);
@@ -7905,6 +8464,50 @@ mod tests {
         key(&mut a, KeyCode::Enter);
         assert!(a.ctxmenu.is_none(), "running a row closes the menu");
         assert!(a.visual, "v from the menu did what v does");
+    }
+
+    #[test]
+    fn the_context_menu_opens_at_the_mouse_hovers_the_row_under_it_and_a_click_runs_or_dismisses() {
+        let mut a = app();
+        let (x, _y) = two(&mut a);
+        a.set_cursor(x);
+        click(&mut a, MouseButton::Right, (2.0, 2.0));
+        let st = a.ctxmenu.as_ref().unwrap();
+        assert_eq!(st.at, (2, 2), "opened right where the click landed");
+        let area = st.area(a.body);
+        assert_eq!((area.x, area.y), (2, 2), "and drawn there too — a dropdown, not centred");
+        let find_row = |a: &App, want: usize| -> (f64, f64) {
+            let st = a.ctxmenu.as_ref().unwrap();
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    if st.row_at(area, x, y) == Some(want) {
+                        return (x as f64, y as f64);
+                    }
+                }
+            }
+            panic!("row {want} is not visible in {area:?}");
+        };
+        // Hovering follows the mouse, the way j/k would.
+        let at1 = find_row(&a, 1);
+        mouse(&mut a, MouseEventKind::Moved, at1);
+        assert_eq!(a.ctxmenu.as_ref().unwrap().sel, 1);
+        let at0 = find_row(&a, 0);
+        mouse(&mut a, MouseEventKind::Moved, at0);
+        assert_eq!(a.ctxmenu.as_ref().unwrap().sel, 0, "back to row 0's");
+        // A click on the hovered row runs it, same as enter, and closes the menu.
+        let i = a.ctxmenu.as_ref().unwrap().rows.iter().position(|r| r.cmd.keys == "v").expect("v is available in normal mode");
+        a.ctxmenu.as_mut().unwrap().sel = i;
+        let at_v = find_row(&a, i);
+        click(&mut a, MouseButton::Left, at_v);
+        assert!(a.ctxmenu.is_none(), "running a row closes the menu");
+        assert!(a.visual, "v from the menu did what v does, same as enter would have");
+        // Reopen, and a click off the menu entirely dismisses it without running anything.
+        a.visual = false;
+        click(&mut a, MouseButton::Right, (2.0, 2.0));
+        assert!(a.ctxmenu.is_some());
+        click(&mut a, MouseButton::Left, (70.0, 20.0));
+        assert!(a.ctxmenu.is_none(), "a click off the dropdown dismisses it, like any other");
+        assert!(!a.visual, "nothing ran");
     }
 
     #[test]
@@ -8024,7 +8627,23 @@ mod eyeball {
         a.run_excmd("tabnew freeform gallery".into());
         let x = a.doc.add(ShapeKind::Box, "Items", 10.0, 6.0);
         a.set_cursor(x);
-        a.ctxmenu = Some(ctxmenu::State::new(&a.whereami()));
+        a.ctxmenu = Some(ctxmenu::State::new(&a.whereami(), (30, 10), (30.0, 10.0)));
+        term.draw(|f| a.draw(f)).unwrap();
+        println!("{}", dump(&term));
+    }
+
+    #[test]
+    #[ignore]
+    fn render_the_right_click_menu_on_empty_grid() {
+        let mut term = Terminal::new(TestBackend::new(90, 26)).unwrap();
+        let mut a = App::new();
+        a.loading = false;
+        a.run_excmd("tabnew freeform gallery".into());
+        a.doc.add(ShapeKind::Box, "Items", 10.0, 6.0);
+        term.draw(|f| a.draw(f)).unwrap();
+        let ev = |kind| crossterm::event::MouseEvent { kind, column: 55, row: 15, modifiers: crossterm::event::KeyModifiers::NONE };
+        a.on_mouse(ev(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right)));
+        a.on_mouse(ev(crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Right)));
         term.draw(|f| a.draw(f)).unwrap();
         println!("{}", dump(&term));
     }

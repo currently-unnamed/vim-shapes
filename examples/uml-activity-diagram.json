@@ -1,0 +1,129 @@
+{
+  "version": 3,
+  "current": 0,
+  "tabs": [
+    {
+      "name": "uml-activity-diagram",
+      "diagram": {
+        "version": 2,
+        "metadata": {
+          "title": "Checkout — activity diagram",
+          "view": "freeform"
+        },
+        "elements": [
+          {
+            "id": 0,
+            "kind": "circle",
+            "label": "Start",
+            "x": 20.0,
+            "y": 0.0,
+            "w": 12.0,
+            "h": 6.0
+          },
+          {
+            "id": 1,
+            "kind": "box",
+            "label": "Validate Cart",
+            "x": 20.0,
+            "y": 9.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 2,
+            "kind": "box",
+            "label": "Process Payment",
+            "x": 20.0,
+            "y": 17.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 3,
+            "kind": "diamond",
+            "label": "Payment OK?",
+            "x": 20.0,
+            "y": 25.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 4,
+            "kind": "box",
+            "label": "Send Confirmation",
+            "x": 44.0,
+            "y": 25.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 5,
+            "kind": "box",
+            "label": "Notify Failure",
+            "x": -4.0,
+            "y": 25.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 6,
+            "kind": "circle",
+            "label": "End",
+            "x": 22.0,
+            "y": 33.0,
+            "w": 12.0,
+            "h": 6.0
+          }
+        ],
+        "relations": [
+          {
+            "id": 0,
+            "kind": "flow",
+            "from": 0,
+            "to": 1
+          },
+          {
+            "id": 1,
+            "kind": "flow",
+            "from": 1,
+            "to": 2
+          },
+          {
+            "id": 2,
+            "kind": "flow",
+            "from": 2,
+            "to": 3
+          },
+          {
+            "id": 3,
+            "kind": "flow",
+            "from": 3,
+            "to": 4,
+            "label": "yes"
+          },
+          {
+            "id": 4,
+            "kind": "flow",
+            "from": 3,
+            "to": 5,
+            "label": "no"
+          },
+          {
+            "id": 5,
+            "kind": "flow",
+            "from": 4,
+            "to": 6
+          },
+          {
+            "id": 6,
+            "kind": "flow",
+            "from": 5,
+            "to": 6
+          }
+        ],
+        "next_element_id": 7,
+        "next_relation_id": 7
+      }
+    }
+  ]
+}

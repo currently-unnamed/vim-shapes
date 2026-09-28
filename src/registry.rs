@@ -64,6 +64,9 @@ impl Key {
 /// is whichever sighting had the most properties (the most complete definition), first seen
 /// breaking a tie. `seen_in` is how many diagrams draw it at all — shown in the workbench row
 /// so more than one is a visible hint that it might be worth checking for drift by hand.
+/// `seen_paths` is the coarser, file-level twin of that count — every distinct *file* (not
+/// tab) it turns up in, sorted, for `:grep`'s "which diagrams have this" to open straight
+/// from, the same granularity `workbench_open_diagram` already opens at.
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub key: Key,
@@ -72,6 +75,23 @@ pub struct Entry {
     pub properties: Vec<Property>,
     pub status: Status,
     pub seen_in: usize,
+    pub seen_paths: Vec<PathBuf>,
+}
+
+impl Entry {
+    /// Whether a `:grep` query names this entry — its label, its kind, its `api_name`, or one
+    /// of its properties' names or `api_name`s, so "which diagrams touch `orderId`" answers
+    /// with the object type that has it, not just an entry literally called `orderId`.
+    pub fn matches(&self, query: &str) -> bool {
+        let q = query.trim().to_ascii_lowercase();
+        if q.is_empty() {
+            return false;
+        }
+        self.name.to_ascii_lowercase().contains(&q)
+            || self.key.kind.name().to_ascii_lowercase().contains(&q)
+            || self.api_name.as_deref().is_some_and(|a| a.to_ascii_lowercase().contains(&q))
+            || self.properties.iter().any(|p| p.name.to_ascii_lowercase().contains(&q) || p.api_name.as_deref().is_some_and(|a| a.to_ascii_lowercase().contains(&q)))
+    }
 }
 
 pub struct Registry {
@@ -186,11 +206,22 @@ pub fn build(root: &Path) -> Registry {
                             existing.status = e.status;
                         }
                         existing.seen_in += 1;
+                        if !existing.seen_paths.contains(&path) {
+                            existing.seen_paths.push(path.clone());
+                        }
                     }
                     None => {
                         entries.insert(
                             key.clone(),
-                            Entry { key, name: e.display(), api_name: e.api_name.clone(), properties: e.properties.clone(), status: e.status, seen_in: 1 },
+                            Entry {
+                                key,
+                                name: e.display(),
+                                api_name: e.api_name.clone(),
+                                properties: e.properties.clone(),
+                                status: e.status,
+                                seen_in: 1,
+                                seen_paths: vec![path.clone()],
+                            },
                         );
                     }
                 }
@@ -250,7 +281,47 @@ mod tests {
         let entry = reg.entries.values().next().unwrap();
         assert_eq!(entry.properties.len(), 1, "the richer sighting's properties won");
         assert_eq!(entry.seen_in, 2);
+        let mut paths = entry.seen_paths.clone();
+        paths.sort();
+        assert_eq!(paths, vec![root.join("a.json"), root.join("b.json")], "one file each, not two sightings of the same one");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn seen_paths_counts_files_not_tabs_or_elements() {
+        let root = tmp("paths");
+        // Two sightings in the same file — a second tab, and a second element in it — must
+        // still be one path, the granularity `workbench_open_diagram` opens at.
+        let mut ws = Workspace::single("first".into(), Document::default());
+        let mut second = Document::default();
+        second.add(ShapeKind::ObjectType, "Customer", 0.0, 0.0);
+        second.add(ShapeKind::ObjectType, "Customer", 10.0, 0.0);
+        ws.tabs.push(crate::model::Tab { name: "second".into(), diagram: second });
+        persistence::save(&ws, &root.join("only.json")).unwrap();
+        let reg = build(&root);
+        let entry = reg.entries.values().find(|e| e.name == "Customer").unwrap();
+        assert_eq!(entry.seen_in, 2, "two sightings");
+        assert_eq!(entry.seen_paths, vec![root.join("only.json")], "but one file");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_entry_matches_a_grep_on_its_label_kind_api_name_or_a_property() {
+        let e = Entry {
+            key: Key { kind: ShapeKind::ObjectType, ident: Ident::Api("cust".into()) },
+            name: "Customer".into(),
+            api_name: Some("cust".into()),
+            properties: vec![Property { api_name: Some("orderId".into()), ..Property::new("Order Id") }],
+            status: Status::Active,
+            seen_in: 1,
+            seen_paths: Vec::new(),
+        };
+        assert!(e.matches("custom"), "label, case-insensitively");
+        assert!(e.matches("OBJECT TYPE"), "the kind's own name");
+        assert!(e.matches("cust"), "the api_name");
+        assert!(e.matches("orderid"), "a property's api_name, not just its display name");
+        assert!(!e.matches("nothing here"));
+        assert!(!e.matches(""), "an empty query names nothing, rather than everything");
     }
 
     #[test]
@@ -298,7 +369,7 @@ mod tests {
     fn a_fresh_import_redefining_a_known_object_type_is_a_conflict_a_new_one_or_an_unchanged_one_is_not() {
         let key = Key { kind: ShapeKind::ObjectType, ident: Ident::Api("customer".into()) };
         let mut entries = HashMap::new();
-        entries.insert(key.clone(), Entry { key, name: "Customer".into(), api_name: Some("customer".into()), properties: vec![Property::new("id")], status: Status::Active, seen_in: 1 });
+        entries.insert(key.clone(), Entry { key, name: "Customer".into(), api_name: Some("customer".into()), properties: vec![Property::new("id")], status: Status::Active, seen_in: 1, seen_paths: Vec::new() });
         let reg = Registry { entries, edges: Vec::new() };
 
         let index = foundry_fixture(
@@ -344,7 +415,7 @@ mod tests {
     fn apply_incoming_updates_the_entry_in_place() {
         let key = Key { kind: ShapeKind::ObjectType, ident: Ident::Api("customer".into()) };
         let mut entries = HashMap::new();
-        entries.insert(key.clone(), Entry { key: key.clone(), name: "Customer".into(), api_name: Some("customer".into()), properties: vec![Property::new("id")], status: Status::Active, seen_in: 1 });
+        entries.insert(key.clone(), Entry { key: key.clone(), name: "Customer".into(), api_name: Some("customer".into()), properties: vec![Property::new("id")], status: Status::Active, seen_in: 1, seen_paths: Vec::new() });
         let mut reg = Registry { entries, edges: Vec::new() };
         reg.apply_incoming(&key, vec![Property::new("id"), Property::new("name")]);
         assert_eq!(reg.entries.get(&key).unwrap().properties.len(), 2);

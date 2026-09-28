@@ -15,9 +15,10 @@ use crate::model::{Document, ElementId};
 use crate::ontology::Layer;
 
 /// Gap between elements in a row, and between rows: room for a relation's three nodes and
-/// their labels to be seen and stood on, not just a line's worth.
-pub const GUT_X: f64 = 14.0;
-pub const GUT_Y: f64 = 6.0;
+/// their labels to be seen and stood on, not just a line's worth — but no more than that, so
+/// a diagram reads as one shape close to its neighbours rather than a scatter of boxes.
+pub const GUT_X: f64 = 8.0;
+pub const GUT_Y: f64 = 3.0;
 
 /// Elements in rows by layer; within a row, ordered so that things sit near what they relate
 /// to in the row above — one barycentre pass, because the row above is always placed first.

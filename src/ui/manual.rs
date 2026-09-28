@@ -444,10 +444,25 @@ fn build_pages() -> Vec<Page> {
              >  tab          the next node: tail, centre, head (shift-tab: back)\n\
              >  t            label this node\n\
              >  enter or r   change its kind\n\
+             >  i            an orthogonal route's one turn — hjkl (below) pulls it\n\
              >  x            remove it\n\
              >  c            the sheet: its kind, look, three labels, ports, reverse\n\
              >  gd           go to the element at this end (from the centre: the far end)\n\
              >  esc          back to the element\n\
+             \n\
+             # pulling an orthogonal line's own turn\n\
+             \n\
+             Two boxes joined by more than one relation on the same side crowd their\n\
+             lines onto the same handle — every line square to its own box, none of\n\
+             them square with each other. i on a focused relation with an orthogonal\n\
+             route grabs its one turn (the sheet calls the same thing elbow); hjkl, the\n\
+             arrows, or ctrl/shift for a bigger pull, then slide it — h/l if the line\n\
+             leaves from a side, j/k if it leaves from a top or bottom edge, whichever\n\
+             the route actually runs on. The other pair does nothing, the same as a\n\
+             resize handle already ignores whichever axis it has no edge on. enter or\n\
+             esc lets go — the whole pull, however many keys it took, is one undo step.\n\
+             A straight or curved route has no turn to grab at all; c's own route field\n\
+             changes the kind of line first.\n\
              \n\
              # a link's look\n\
              \n\
@@ -476,16 +491,23 @@ fn build_pages() -> Vec<Page> {
              >  click                 land the cursor on what is under it — a shape or\n\
              >                        a relation\n\
              >  click on ground       let go of the pick\n\
-             >  drag a body           move it (the whole pick, if it is part of one)\n\
+             >  drag a body           move it (the whole pick, if it is part of one) —\n\
+             >                        always, the body is never ambiguous\n\
              >  hover a shape         its eight handles show, the same ones i opens, and\n\
              >                        eight faint arrows just outside them\n\
              >  drag an open handle   resize that corner or edge\n\
+             >  ctrl-drag an open     draw a relation instead, to wherever it lets go — the\n\
+             >  handle                same picker enter/hjkl/enter opens, for a NEW relation\n\
+             >                        between the two; let go over nothing and it just\n\
+             >                        disappears, the same as backing out of a hold. A\n\
+             >                        handle is the one place a plain drag was ever\n\
+             >                        ambiguous, so it is the one place ctrl matters\n\
              >  drag a patched handle move the relation's end to another handle on the\n\
              >                        same shape\n\
              >  click an arrow        open a new shape that way — the same dialog o and a\n\
              >                        ctrl-direction chord open, anchored at that handle\n\
-             >  right-drag,           the same picker enter/hjkl/enter opens, for a NEW\n\
-             >  shape to shape        relation between the two\n\
+             >  right-drag,           the same as a ctrl-drag on a handle, with the right\n\
+             >  shape to shape        button — unaffected by ctrl, it was never ambiguous\n\
              >  right-drag from       pan — the view moves exactly as far and the same way\n\
              >  empty ground          as the mouse, like dragging the canvas itself by hand\n\
              >  right-click, mid a    let go of it instead — a held handle, a relation\n\
@@ -494,12 +516,13 @@ fn build_pages() -> Vec<Page> {
              >  otherwise             read straight off the ? cheatsheet's own table\n\
              >  scroll                pan the view, a step at a time\n\
              \n\
-             A drag that never moves anything is a click: nothing is written to the\n\
-             document until something actually moves, so landing the cursor by mouse\n\
-             costs exactly as little as landing it with hjkl. A right-drag that panned\n\
-             is the same distinction the other way — it let go having only moved the\n\
-             view, not the pick or hold it started with, since a pan is a deliberate\n\
-             look elsewhere, not a cancel.\n\
+             A drag that never leaves its own shape is a click: nothing is written to the\n\
+             document until something actually moves — or, from a handle with ctrl, a\n\
+             relation actually lands elsewhere — so landing the cursor by mouse costs\n\
+             exactly as little as landing it with hjkl. A right-drag that panned is the\n\
+             same distinction the other way — it let go having only moved the view, not\n\
+             the pick or hold it started with, since a pan is a deliberate look\n\
+             elsewhere, not a cancel.\n\
              \n\
              Dragging from empty ground with the LEFT button draws a marquee; letting\n\
              go picks every shape it touches, the same set V and a motion would. See\n\
@@ -508,15 +531,28 @@ fn build_pages() -> Vec<Page> {
              \n\
              # the context menu\n\
              \n\
-             An idle right-click — nothing held, nothing being reshaped — opens a menu of\n\
-             every command that is available right where the cursor lands: j/k to a row,\n\
-             enter runs it exactly as the ? menu's own enter would, esc closes it without\n\
-             doing anything. A current pick or visual-mode selection is left exactly as it\n\
-             was rather than cleared, since acting on it — deleting it, say — is often the\n\
-             whole reason for asking; esc is still how to clear one outright. Nothing here\n\
-             is a second list of commands: it is the same table ? reads, filtered to what\n\
-             this moment allows, so the menu can never offer something the keyboard would\n\
-             refuse.\n\
+             An idle right-click — nothing held, nothing being reshaped — opens a menu, as\n\
+             a dropdown at the mouse rather than centred on the diagram, flipped back\n\
+             on-screen if it opened too close to an edge to fit. It focuses whatever the\n\
+             click actually landed on first — an element, a relation (the same as a left\n\
+             click would), or, on empty grid, nothing — so the menu is never built from\n\
+             wherever the cursor happened to be before. j/k or hovering a row move the\n\
+             pick, enter or a left click on a row runs it exactly as the ? menu's own\n\
+             enter would — and so does typing a row's own key outright, the same key ?\n\
+             would show beside it, so a row already known by its letter needs no walking\n\
+             to. esc or a left click anywhere else closes it without doing\n\
+             anything — the way clicking off any dropdown dismisses it. A current pick or\n\
+             visual-mode selection is left exactly as it was rather than cleared, since\n\
+             acting on it — deleting it, say — is often the whole reason for asking; esc\n\
+             is still how to clear one outright.\n\
+             \n\
+             It reads the same table ? does, so it can never offer something the keyboard\n\
+             would refuse — but it shows far less of it: only a complete, one-shot action\n\
+             (add, delete, copy, paste, rename, undo, the sheet, ...) earns a row, never a\n\
+             motion, a chord that only makes sense mid-gesture, or something a drag\n\
+             already does more directly. On empty grid that leaves mostly ADD and, once\n\
+             something is copied, PASTE — both land exactly where the menu was opened,\n\
+             not \"beside the cursor\", since there may not be one.\n\
              \n\
              :debug's \"last mouse\" row says what the last mouse event was, the way\n\
              \"last key\" does for the keyboard — the first thing to check when a click\n\
@@ -539,7 +575,7 @@ fn build_pages() -> Vec<Page> {
              >  - = _ +      narrower / wider / shorter / taller\n\
              >  < > { }      lean the shape a cell left / right, up / down — inside it too\n\
              >  i            step into the shape: drag the sides and corners of its box\n\
-             >  d            delete the element and its relations (asks first)\n\
+             >  d            cut the element and its relations (asks first); p brings it back\n\
              >  y  p         copy the element; paste it beside the cursor\n\
              >  u  ^r        undo, redo — every edit is one step\n\
              \n\
@@ -558,11 +594,11 @@ fn build_pages() -> Vec<Page> {
              # the sheet\n\
              \n\
              c opens the SHEET, docked down the right: the properties of whatever the\n\
-             cursor is on, in three tabs — STYLE, TEXT, ARRANGE — and it follows the\n\
-             cursor while it is up. c gives it the keyboard; esc hands the keyboard back\n\
-             to the diagram and leaves the sheet up, so you walk the graph with hjkl and\n\
-             watch it retarget; c re-enters; q closes. The tab and the field you were on\n\
-             are kept across shapes that have them, so tuning six links is l, l, l.\n\
+             cursor is on, in three tabs — STYLE, TEXT, ARRANGE. It has the keyboard from\n\
+             the moment it opens — hjkl move between its own fields, not the diagram —\n\
+             until esc or q closes it, or a click lands in the grid: off the sheet and\n\
+             back to the diagram in the one gesture, not swallowed waiting for a second\n\
+             click. c opens it again, freshly, on whatever the cursor is on by then.\n\
              \n\
              >  j/k          the next field       tab / shift-tab    the next tab\n\
              >  i            type into the field (esc or enter leaves it)\n\
@@ -570,13 +606,21 @@ fn build_pages() -> Vec<Page> {
              >  H/L          step a number by ten, stopping at its limit\n\
              >  t            the label\n\
              >  enter        run an action, or step into the field\n\
-             >  esc          keyboard back to the diagram     q     close\n\
+             >  esc  q       close it — a click into the grid does the same\n\
              \n\
-             A shape's sheet: style — LOOK (eight fill-and-line pairs: paper, grey,\n\
-             blue, green, orange, yellow, red, purple), FILL (auto for the layer's own\n\
-             pastel in the exports, none, or a colour), OUTLINE on or off, COLOUR of the\n\
+             A shape's sheet: style — LOOK (eight fill-and-line pairs: paper, grey, blue,\n\
+             green, orange, yellow, red, purple — a plain sketch shape only: an\n\
+             architecture shape's colour already says which layer it's in, so it has no\n\
+             look of its own), FILL (auto for the layer's own pastel — on screen too, not\n\
+             just the exports, for anything but a plain sketch shape, which stays blank\n\
+             unless it picks a colour of its own — or none), OUTLINE on\n\
+             or off, COLOUR of the\n\
              line (the |palette|'s ten or any hex, blank for the layer's own), LINE\n\
-             (solid, dashed, dotted), STROKE (1 to 3 dots) and OPACITY (10 to 100 %). On\n\
+             (solid, dashed, dotted), STROKE (1 to 3 dots), OPACITY (10 to 100 %) and INK\n\
+             (auto — the document's own ink, set at the top with :ink — or lines /\n\
+             braille for this shape alone; never the relation reaching it or its cursor\n\
+             tint, which stay the document's, or its handles, which are always in line\n\
+             art — a control, not the sketch). On\n\
              screen a fill tints the inside and opacity fades toward the ground; the\n\
              exports fill, dash and blend for real; text — the label, BOLD, ITALIC,\n\
              UNDERLINE (the terminal's own; the family's faces in the pictures), TEXT\n\
@@ -624,7 +668,10 @@ fn build_pages() -> Vec<Page> {
              Every shape lives in a box, and i steps INTO the shape, onto that box: a\n\
              handle appears on each side and each corner. A handle is a PORT — where a\n\
              relation attaches — and it is also what you drag to reshape. hjkl move\n\
-             between the handles; a ring marks one with a relation attached.\n\
+             between the handles; a ring marks one with a relation attached. A handle,\n\
+             and the mouse's hover arrows beside it, always draw in line art, whatever\n\
+             :ink or a shape's own INK says — a control should stay legible and exact,\n\
+             not follow a choice made for the sketch underneath it.\n\
              \n\
              >  enter          on an open handle: take hold; hjkl drag a cell, ^hjkl four;\n\
              >                 enter or esc lets go. A side moves one edge, a corner two.\n\
@@ -650,7 +697,8 @@ fn build_pages() -> Vec<Page> {
              follows its moved end), - = and _ + STRETCH it narrower / wider and\n\
              shorter / taller — places and sizes scale together, as a desktop group\n\
              does dragged by a corner — y copies it with the relations among it, and dd\n\
-             deletes it — d asks, and a second d is the yes. c opens the sheet on the\n\
+             cuts it — d asks, and a second d is the yes; p brings the set straight back.\n\
+             c opens the sheet on the\n\
              SET: only what the shapes share, MIXED where they differ, and a value set\n\
              there is set on all of them at once, in one undo step. Its arrange tab\n\
              ends with the set's own actions: ALIGN left / centre / right / top /\n\
@@ -732,10 +780,11 @@ fn build_pages() -> Vec<Page> {
             "*render*  the diagram as a picture\n\
              \n\
              :render <out.png> writes this tab as a PNG. Not a redrawing: the CELLS, exactly\n\
-             as the terminal shows them — every glyph, braille included — rasterised through\n\
-             a real monospace font, so the thing on screen and the thing in the file are\n\
-             one rendering. The whole diagram is framed by its bounds with a cell of margin,\n\
-             no chrome, no cursor; the grid is drawn if it is on.\n\
+             as the terminal shows them — whatever glyph is in each, line art by default or\n\
+             braille if :ink braille is on — rasterised through a real monospace font, so the\n\
+             thing on screen and the thing in the file are one rendering. The whole diagram is\n\
+             framed by its bounds with a cell of margin, no chrome, no cursor; the grid is\n\
+             drawn if it is on.\n\
              \n\
              >  :render out.png            20 px per em, the first monospace font found\n\
              >  :render out.png 32         bigger type, a bigger picture\n\
@@ -744,7 +793,7 @@ fn build_pages() -> Vec<Page> {
              \n\
              Most monospace fonts have no braille, so a small stack of fonts is tried per\n\
              glyph — the terminal's own fallback rule — and the symbol fonts on the machine\n\
-             draw what the main font cannot.\n\
+             draw what the main font cannot; line art, the default, has no such gap.\n\
              \n\
              \\ PRESENTS: the diagram alone on the screen, no header, footer, grid or\n\
              cursor, framed the way the rendering is. esc or \\ comes back.\n\
@@ -762,7 +811,8 @@ fn build_pages() -> Vec<Page> {
              :export alone opens the export dialog, the questions any diagram tool's\n\
              image dialog asks: the FORMAT — png, svg, pdf, html, xml (a draw.io file,\n\
              to edit on), or diagram (this tab alone, losslessly — see below); the STYLE —\n\
-             terminal (the braille picture, the terminal's own) or clean (the drawn one V\n\
+             terminal (the terminal's own ink — line art or braille, whichever :ink is\n\
+             set to) or clean (the drawn one V\n\
              previews); the FILE, named after the tab; the ZOOM, with the width and height\n\
              it gives shown and typeable; a TRANSPARENT ground; a light or dark APPEARANCE;\n\
              the BORDER in cells; the GRID. j/k, i to type, h/l to cycle, enter exports.\n\
@@ -928,11 +978,36 @@ fn build_pages() -> Vec<Page> {
              >  p              put whatever m grabbed into the folder under the cursor now\n\
              >                 (esc, while something is grabbed, cancels the move instead)\n\
              >  d              delete — a real rm, so the app asks first\n\
+             >  /              search — narrow the tree by name (below)\n\
+             >  g/             grep — search every diagram's own contents (below)\n\
              >  esc / q        close the panel\n\
              \n\
              Unlike :sheet's own dock on the right, this one never floats — it always holds\n\
              its column, clamped rather than hidden on a narrow terminal, since it is a\n\
              folder you are working against, not a momentary editor.\n\
+             \n\
+             # / and g/ — finding something in a big workbench\n\
+             \n\
+             Letters here are commands (n, r, m, p, d above), so unlike |tree|'s own always-on\n\
+             search a letter cannot also mean \"narrow the list\" without taking one of those\n\
+             away. / is the seam: it starts typing a search, and only then do letters go into\n\
+             it instead of running a command. Backspace edits it, enter keeps it (browsing\n\
+             then resumes on the narrowed list — j/k, n/N/r/m/p/d all work exactly as above,\n\
+             just against fewer rows), esc clears it. A search ignores fold state entirely —\n\
+             every folder on the way to a match opens on its own, the elements section forces\n\
+             itself open too — so it always reaches the whole tree, not just whatever happened\n\
+             to already be expanded. With a search active, esc clears it before the panel's own\n\
+             esc/q would close the panel — the same two-step esc a grabbed row (m) already gets.\n\
+             \n\
+             g/ is a second, separate search: not a row's name, but what is actually drawn\n\
+             inside every diagram under the root — an element's label, its kind, its API name,\n\
+             or a property's. \"which diagrams use this shape\" is a different question from\n\
+             \"is this folder named right\", so it opens its own overlay on top of the tree\n\
+             rather than reusing /. One row per diagram a match is seen in — a shape drawn in\n\
+             three files is three rows — since the point is a file to open, not just a name\n\
+             that exists somewhere. ↑/↓ move, enter opens that file (closing both the search\n\
+             and the workbench underneath it, the same as enter on a diagram row above), esc\n\
+             backs out without opening anything.\n\
              \n\
              # elements — every distinct thing, once\n\
              \n\

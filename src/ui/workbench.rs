@@ -6,9 +6,18 @@
 //! every key is handled in `ui::mod`'s `workbench_key`, the same split `props.rs`/`tree.rs`
 //! keep between their own state and the app's key handler.
 //!
-//! No live filter: unlike `tree.rs`'s one-shot browser, this panel's letters are actions
-//! (`n`/`N`/`r`/`m`/`p`/`d`), the same grammar `props.rs` uses for its rows — so, like props,
-//! there is no type-to-search here.
+//! This panel's letters are actions (`n`/`N`/`r`/`m`/`p`/`d`), the same grammar `props.rs`
+//! uses for its rows — so, unlike `tree.rs`'s one-shot browser, a letter cannot *always* mean
+//! "add to the search" without taking one of those away. `/` is the seam: it arms `filtering`,
+//! and only then do letters go into `filter` instead of running a command — `tree.rs`'s own
+//! rule (ignore fold state, show every path down to a match) applies to what `/` narrows,
+//! folders and the registry's own elements section alike, so leaving it engaged is what makes
+//! the tree reachable across however deep a team's workbench has grown. `g/` is a second,
+//! separate search — a content grep across every file's own elements (`registry::Entry`'s
+//! label, kind, `api_name` and properties, not just a row's name on screen) — because "is
+//! this folder named right" and "does anything anywhere reference this shape" are different
+//! questions, and conflating them into one filter would make the common, cheap one page
+//! through the registry's `seen_paths` on every keystroke for no reason.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -58,16 +67,29 @@ pub struct State {
     pub editing: Option<(Typing, String)>,
     /// `m` on a row grabs it here; `p` on a folder row puts it there.
     pub grabbed: Option<wb::Entry>,
+    /// What `/` narrows the tree to — empty means no filter. Kept even after `filtering`
+    /// goes back to `false` on `enter`, so browsing resumes on the narrowed list rather than
+    /// snapping back to everything the moment typing stops.
+    pub filter: String,
+    /// `true` only while a `/` search is being typed — letters go into `filter` instead of
+    /// running a command. `esc` clears `filter` too (a second `esc`, with nothing left to
+    /// clear, closes the panel); `enter` leaves this `false` with `filter` intact.
+    pub filtering: bool,
+    /// Armed by a bare `g` and consumed by the very next key — `/` opens the content grep,
+    /// anything else drops it silently. A one-key memory, not `keymap::Prefix`: that enum is
+    /// the main canvas dispatcher's own grammar, and this panel's `g` means nothing outside
+    /// this one chord, so it has no business sharing the other's state.
+    pub pending_g: bool,
 }
 
 impl State {
     pub fn recents(recents: Vec<PathBuf>) -> State {
-        State { root: None, nodes: Vec::new(), recents, expanded: HashSet::new(), groups_expanded: HashSet::new(), sel: 0, editing: None, grabbed: None }
+        State { root: None, nodes: Vec::new(), recents, expanded: HashSet::new(), groups_expanded: HashSet::new(), sel: 0, editing: None, grabbed: None, filter: String::new(), filtering: false, pending_g: false }
     }
 
     pub fn opened(root: PathBuf) -> State {
         let nodes = wb::scan(&root);
-        State { root: Some(root), nodes, recents: Vec::new(), expanded: HashSet::new(), groups_expanded: HashSet::new(), sel: 0, editing: None, grabbed: None }
+        State { root: Some(root), nodes, recents: Vec::new(), expanded: HashSet::new(), groups_expanded: HashSet::new(), sel: 0, editing: None, grabbed: None, filter: String::new(), filtering: false, pending_g: false }
     }
 
     /// Re-read the folder from disk — after every create, rename, move or delete. The
@@ -84,36 +106,44 @@ impl State {
     /// it — the virtual "elements" section, grouped by layer then kind, each level shown
     /// only when something is actually under it (`tree.rs`'s rule for a *derived* grouping,
     /// unlike a real folder above, which is shown even empty). `registry` lives on `App`,
-    /// not here — see `rescan`'s doc comment for why.
+    /// not here — see `rescan`'s doc comment for why. While `filter` is set, both halves
+    /// apply it — the fold state of a folder or a layer/kind group is ignored in favour of
+    /// showing every path down to a match, `tree.rs`'s own rule, so search always reaches
+    /// the whole tree rather than whatever happened to already be open.
     pub fn display_rows(&self, registry: Option<&registry::Registry>) -> Vec<DisplayRow> {
-        let mut out: Vec<DisplayRow> = rows(&self.nodes, &self.expanded).into_iter().map(DisplayRow::Fs).collect();
+        let f = self.filter.trim().to_ascii_lowercase();
+        let mut out: Vec<DisplayRow> = rows(&self.nodes, &self.expanded, &f).into_iter().map(DisplayRow::Fs).collect();
         let Some(reg) = registry else { return out };
         if reg.entries.is_empty() {
             return out;
         }
-        let root_open = self.groups_expanded.contains(&GroupId::Root);
+        let matches = |e: &registry::Entry| f.is_empty() || e.name.to_ascii_lowercase().contains(&f);
+        if !reg.entries.values().any(matches) {
+            return out;
+        }
+        let root_open = self.groups_expanded.contains(&GroupId::Root) || !f.is_empty();
         out.push(DisplayRow::Heading);
         out.push(DisplayRow::Group { id: GroupId::Root, label: "elements".into(), depth: 0, expanded: root_open });
         if !root_open {
             return out;
         }
         for layer in Layer::ALL {
-            let kinds: Vec<ShapeKind> = ShapeKind::ALL.into_iter().filter(|k| k.layer() == layer && reg.entries.keys().any(|key| key.kind == *k)).collect();
+            let kinds: Vec<ShapeKind> = ShapeKind::ALL.into_iter().filter(|k| k.layer() == layer && reg.entries.values().any(|e| e.key.kind == *k && matches(e))).collect();
             if kinds.is_empty() {
                 continue;
             }
-            let layer_open = self.groups_expanded.contains(&GroupId::Layer(layer));
+            let layer_open = self.groups_expanded.contains(&GroupId::Layer(layer)) || !f.is_empty();
             out.push(DisplayRow::Group { id: GroupId::Layer(layer), label: layer.name().to_string(), depth: 1, expanded: layer_open });
             if !layer_open {
                 continue;
             }
             for kind in kinds {
-                let kind_open = self.groups_expanded.contains(&GroupId::Kind(kind));
+                let kind_open = self.groups_expanded.contains(&GroupId::Kind(kind)) || !f.is_empty();
                 out.push(DisplayRow::Group { id: GroupId::Kind(kind), label: kind.name().to_string(), depth: 2, expanded: kind_open });
                 if !kind_open {
                     continue;
                 }
-                let mut entries: Vec<&registry::Entry> = reg.entries.values().filter(|e| e.key.kind == kind).collect();
+                let mut entries: Vec<&registry::Entry> = reg.entries.values().filter(|e| e.key.kind == kind && matches(e)).collect();
                 entries.sort_by(|a, b| a.name.cmp(&b.name));
                 for e in entries {
                     out.push(DisplayRow::Element { key: e.key.clone(), name: e.name.clone(), seen_in: e.seen_in, depth: 3 });
@@ -166,6 +196,13 @@ impl State {
         }
         self.sel = (self.sel as isize + delta).rem_euclid(n as isize) as usize;
     }
+
+    /// `/`'s own typing — same shape as `tree::State::retype`, resetting `sel` so a narrower
+    /// (or wider) list never leaves the cursor stranded past its end or on an unrelated row.
+    pub fn retype(&mut self, f: impl FnOnce(&mut String)) {
+        f(&mut self.filter);
+        self.sel = 0;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -208,27 +245,43 @@ pub enum RowKind {
     Diagram,
 }
 
-pub fn rows(nodes: &[wb::Node], expanded: &HashSet<PathBuf>) -> Vec<Row> {
+/// The tree's own rows, folded per `expanded` — or, while `filter` (already lowercased and
+/// trimmed) is non-empty, `tree.rs`'s rule instead: fold state is ignored, and only a folder
+/// on a path to a match, or a diagram matching itself, is shown at all.
+pub fn rows(nodes: &[wb::Node], expanded: &HashSet<PathBuf>, filter: &str) -> Vec<Row> {
     let mut out = Vec::new();
-    walk(nodes, 0, expanded, &mut out);
+    walk(nodes, 0, expanded, filter, &mut out);
     out
 }
 
-fn walk(nodes: &[wb::Node], depth: usize, expanded: &HashSet<PathBuf>, out: &mut Vec<Row>) {
+fn walk(nodes: &[wb::Node], depth: usize, expanded: &HashSet<PathBuf>, filter: &str, out: &mut Vec<Row>) {
     for n in nodes {
         match n {
             wb::Node::Folder { path, name, children } => {
-                let open = expanded.contains(path);
+                let matches = filter.is_empty() || name.to_ascii_lowercase().contains(filter) || any_match(children, filter);
+                if !matches {
+                    continue;
+                }
+                let open = expanded.contains(path) || !filter.is_empty();
                 out.push(Row { path: path.clone(), depth, name: name.clone(), kind: RowKind::Folder { expanded: open } });
                 if open {
-                    walk(children, depth + 1, expanded, out);
+                    walk(children, depth + 1, expanded, filter, out);
                 }
             }
             wb::Node::Diagram { path, name } => {
-                out.push(Row { path: path.clone(), depth, name: name.clone(), kind: RowKind::Diagram });
+                if filter.is_empty() || name.to_ascii_lowercase().contains(filter) {
+                    out.push(Row { path: path.clone(), depth, name: name.clone(), kind: RowKind::Diagram });
+                }
             }
         }
     }
+}
+
+fn any_match(nodes: &[wb::Node], filter: &str) -> bool {
+    nodes.iter().any(|n| match n {
+        wb::Node::Folder { name, children, .. } => name.to_ascii_lowercase().contains(filter) || any_match(children, filter),
+        wb::Node::Diagram { name, .. } => name.to_ascii_lowercase().contains(filter),
+    })
 }
 
 pub struct Browser<'a> {
@@ -245,11 +298,12 @@ impl Widget for Browser<'_> {
             None => "workbench — pick one".to_string(),
         };
         let inner = chrome::panel(buf, area, &title, theme::t().aqua);
-        let hint = match (&s.editing, &s.grabbed, &s.root) {
-            (Some(_), _, _) => " type a name — enter, or esc",
-            (None, Some(_), _) => " navigate, then p to put it here — esc cancels the move",
-            (None, None, Some(_)) => " j/k move  enter open  i insert  n diagram  N folder  r rename  m move  d delete  esc",
-            (None, None, None) => " j/k move  enter opens it  esc closes",
+        let hint = match (s.filtering, &s.editing, &s.grabbed, &s.root) {
+            (true, _, _, _) => " type to search — enter keeps it, esc clears it",
+            (false, Some(_), _, _) => " type a name — enter, or esc",
+            (false, None, Some(_), _) => " navigate, then p to put it here — esc cancels the move",
+            (false, None, None, Some(_)) => " j/k move  enter open  i insert  / search  g/ grep  n diagram  N folder  r rename  m move  d delete  esc",
+            (false, None, None, None) => " j/k move  enter opens it  esc closes",
         };
         let body = chrome::hint(buf, inner, hint);
         if body.height < 2 {
@@ -257,6 +311,14 @@ impl Widget for Browser<'_> {
         }
 
         let mut lines: Vec<Line> = Vec::new();
+        if s.root.is_some() && (s.filtering || !s.filter.is_empty()) {
+            let cursor = if s.filtering { "█" } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(" /", Style::new().fg(theme::t().aqua).bold()),
+                Span::styled(s.filter.clone(), Style::new().fg(theme::t().ink)),
+                Span::styled(cursor, Style::new().fg(theme::t().aqua)),
+            ]));
+        }
         if s.root.is_none() {
             if s.recents.is_empty() {
                 lines.push(Line::styled(" no workbench opened yet — :workbench <path>", Style::new().fg(theme::t().dim)));
@@ -271,7 +333,9 @@ impl Widget for Browser<'_> {
         }
 
         let all = s.display_rows(self.registry);
-        if all.is_empty() && s.editing.is_none() {
+        if all.is_empty() && s.editing.is_none() && !s.filter.is_empty() {
+            lines.push(Line::styled(format!(" nothing matches {:?}", s.filter), Style::new().fg(theme::t().red)));
+        } else if all.is_empty() && s.editing.is_none() {
             lines.push(Line::styled(" empty — n adds a diagram, N a folder", Style::new().fg(theme::t().dim)));
         }
         for (i, row) in all.iter().enumerate() {
@@ -348,16 +412,33 @@ mod tests {
     #[test]
     fn a_folded_folder_hides_its_children_until_expanded() {
         let expanded = HashSet::new();
-        let closed = rows(&sample(), &expanded);
+        let closed = rows(&sample(), &expanded, "");
         assert_eq!(closed.len(), 2, "Billing folded, plus the top-level diagram");
         assert!(matches!(closed[0].kind, RowKind::Folder { expanded: false }));
 
         let mut expanded = HashSet::new();
         expanded.insert(PathBuf::from("/root/Billing"));
-        let opened = rows(&sample(), &expanded);
+        let opened = rows(&sample(), &expanded, "");
         assert_eq!(opened.len(), 3);
         assert_eq!(opened[1].name, "Overview.json");
         assert_eq!(opened[1].depth, 1);
+    }
+
+    #[test]
+    fn a_search_ignores_fold_state_and_shows_every_matching_path() {
+        // Billing is folded, but searching for its own child must still reveal it — the
+        // same rule tree.rs's search already uses.
+        let rows = rows(&sample(), &HashSet::new(), "overview");
+        assert_eq!(rows.len(), 2, "Billing (a path to the match) plus the match itself");
+        assert!(matches!(rows[0].kind, RowKind::Folder { expanded: true }), "forced open by the search");
+        assert_eq!(rows[1].name, "Overview.json");
+
+        // A query matching nothing at all shows nothing, not everything.
+        assert!(rows_for("nothing-like-this").is_empty());
+    }
+
+    fn rows_for(filter: &str) -> Vec<Row> {
+        rows(&sample(), &HashSet::new(), filter)
     }
 
     #[test]
@@ -414,12 +495,13 @@ mod tests {
             properties: Vec::new(),
             status: crate::model::Status::Active,
             seen_in: 1,
+            seen_paths: Vec::new(),
         }
     }
 
     #[test]
     fn a_row_s_own_entry_is_what_move_and_delete_take() {
-        let rows = rows(&sample(), &HashSet::new());
+        let rows = rows(&sample(), &HashSet::new(), "");
         let e = rows[0].entry();
         assert_eq!(e.path, PathBuf::from("/root/Billing"));
         assert_eq!(e.kind, wb::NodeKind::Folder);
@@ -456,7 +538,7 @@ mod tests {
         st.editing = None;
 
         // A row grabbed for a move reads differently, and asks for `p` instead of the usual keys.
-        st.grabbed = Some(rows(&sample(), &HashSet::new())[1].entry());
+        st.grabbed = Some(rows(&sample(), &HashSet::new(), "")[1].entry());
         let out = dump(&render(50, 8, &st, None));
         assert!(out.contains("p to put it here"), "{out}");
         st.grabbed = None;

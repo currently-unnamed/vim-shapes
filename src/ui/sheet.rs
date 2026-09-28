@@ -1,11 +1,16 @@
 //! The sheet — the properties of whatever the cursor is on, docked down the right.
 //!
-//! A pane, not a modal. It is about the *current selection*, and it follows the cursor while
-//! it is open: `c` opens it and gives it the keyboard; `esc` hands the keyboard back to the
-//! diagram and leaves the sheet up, so you walk the graph with hjkl and watch it retarget;
-//! `c` again re-enters; `q` closes. Three tabs — style, text, arrange — with `tab` between
-//! them, and the tab and field you were on remembered across retargets where the next item
-//! has them, so tuning six links is l, l, l.
+//! A pane, not a modal. It is about the *current selection*, and `c` opens it fresh on
+//! whatever the cursor is on. It has the keyboard for as long as it is open — hjkl move
+//! between its own fields, never the diagram's cursor — and `esc` or `q` closes it; so does a
+//! click into the grid, which then lands on the diagram in the same gesture rather than being
+//! swallowed. (An earlier version let `esc` merely hand the keyboard back and leave the sheet
+//! standing open, unfocused, to be walked past with hjkl and watch it retarget — reachable
+//! from the keyboard but not from the mouse, which is exactly the asymmetry that made the
+//! diagram look like it had lost its shapes.) Three tabs — style, text, arrange — with `tab`
+//! between them, and `retarget` is still what a *commit* runs through — changing `kind` can
+//! add or drop fields, so `refresh` keeps you on the field you were on, by name, rather than
+//! by position, if the new list still has it.
 //!
 //! Inside it the grammar is the one used everywhere else: `j`/`k` field, `i` step in and
 //! type, `h`/`l` cycle a choice, `t` the label, `enter` on an action runs it. Every commit is

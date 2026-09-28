@@ -6,7 +6,7 @@
 //! panel behind the canvas survive untouched.
 
 use super::theme;
-use crate::model::{Align, Document, Element, ElementId, Node, RelationId, VAlign};
+use crate::model::{Align, Document, Element, ElementId, ElementInk, Fill, Node, RelationId, VAlign};
 use crate::ontology::{End, Layer, LineStyle};
 use crate::shapes::{self, CurvePrimitive, Point};
 use ratatui::prelude::*;
@@ -134,6 +134,14 @@ impl Widget for Scene<'_> {
 
         if self.ink == super::wire::Ink::Lines {
             super::wire::paint(&self, area, buf);
+            // An element overridden to braille: the whole-scene pass above left it alone
+            // (`wire::paint` skips anything `ink_of` doesn't call Lines), so its outline is
+            // still whatever the ground and grid dots were — drawn now, on its own.
+            for e in self.doc.elements_in_order() {
+                if self.doc.element_visible(e.id) && e.outline && self.ink_of(e) == super::wire::Ink::Braille {
+                    self.paint_one_braille(e, area, buf);
+                }
+            }
         } else {
             let mut scratch = Buffer::empty(area);
             let canvas = Canvas::default()
@@ -151,7 +159,19 @@ impl Widget for Scene<'_> {
                     }
                 }
             }
+            // The reverse: an element overridden to lines, left alone by the braille pass
+            // above for the same reason.
+            for e in self.doc.elements_in_order() {
+                if self.doc.element_visible(e.id) && e.outline && self.ink_of(e) == super::wire::Ink::Lines {
+                    super::wire::paint_one(&self, e, area, buf);
+                }
+            }
         }
+        // The hover/reshape handles, always last and always in line art — a control is not
+        // part of the sketch, it is the interface for editing it, and the crisp fixed glyphs
+        // in `wire::paint_handles` read better under a mouse than a braille mark ever would,
+        // whatever ink the diagram itself is drawn in.
+        super::wire::paint_handles(&self, area, buf);
         self.text(area, buf);
     }
 }
@@ -171,6 +191,45 @@ impl Scene<'_> {
             theme::t().red
         } else {
             theme::fade(n.color.map(theme::colour).unwrap_or(theme::t().structure), n.opacity, self.ground())
+        }
+    }
+
+    /// The ink this element's own outline (and header rule) draws in: its own override, or
+    /// the document's. Never the relations reaching it, its ports, or its cursor tint — those
+    /// stay in the document's ink regardless, so a mixed diagram changes only the shape.
+    pub(crate) fn ink_of(&self, e: &Element) -> super::wire::Ink {
+        match e.ink {
+            ElementInk::Auto => self.ink,
+            ElementInk::Lines => super::wire::Ink::Lines,
+            ElementInk::Braille => super::wire::Ink::Braille,
+        }
+    }
+
+    /// One element only, in braille, when the rest of the scene is drawn in lines —
+    /// [`Element::ink`]'s override. Painted into a scratch canvas the size of the whole area
+    /// and composited back the same way the whole scene is in [`Widget::render`], so only the
+    /// cells this one shape's outline actually touched change.
+    fn paint_one_braille(&self, e: &Element, area: Rect, buf: &mut Buffer) {
+        let (cx, cy) = self.camera;
+        let (w, h) = (area.width as f64, area.height as f64);
+        let flip = move |y: f64| 2.0 * cy + h - y;
+        let page = &self.doc.metadata.page;
+        let colour = self.colour_of(e.id, e.kind.layer());
+        let mut scratch = Buffer::empty(area);
+        let canvas = Canvas::default()
+            .marker(Marker::Braille)
+            .x_bounds([cx, cx + w])
+            .y_bounds([cy, cy + h])
+            .paint(|ctx| paint_shape_outline(ctx, page, e, colour, flip));
+        canvas.render(area, &mut scratch);
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &scratch[(x, y)];
+                if cell.symbol() != " " {
+                    buf[(x, y)].set_symbol(cell.symbol());
+                    buf[(x, y)].set_fg(cell.fg);
+                }
+            }
         }
     }
 
@@ -235,38 +294,9 @@ impl Scene<'_> {
                 paint_mark(ctx, at(t), if on { Mark::Focused(theme::t().yellow) } else { Mark::Plain(theme::t().bright) }, flip);
             }
         }
-        // Inside a shape, its eight handles the same way: a diamond at each, a ring where a
-        // relation is attached, and the one under the cursor filled — green once in hand.
-        // Outside a reshape, the hovered element's handles paint too, unfocused — how a mouse
-        // finds them before it has clicked one.
-        let handles_on = self.reshape.map(|(id, on, held)| (id, Some(on), held)).or(self.hover.map(|id| (id, None, false)));
-        if let Some((id, on, held)) = handles_on
-            && let Some(e) = self.doc.element(id)
-        {
-            for (i, h) in e.handles().into_iter().enumerate() {
-                let patched = !self.doc.at_port(id, i).is_empty();
-                let mark = match (Some(i) == on, held, patched) {
-                    (true, true, _) => Mark::Focused(theme::t().green),
-                    (true, false, _) => Mark::Focused(theme::t().yellow),
-                    (false, _, true) => Mark::Patched(theme::t().aqua),
-                    (false, _, false) => Mark::Plain(theme::t().sand),
-                };
-                paint_mark(ctx, h, mark, flip);
-            }
-            // A plain hover, not a reshape in hand: an arrow just outside each handle too,
-            // faint — click one to add a new connected shape that way, the mouse's own `o`.
-            // Not shown mid-reshape: a handle already in hand has nothing to do with opening
-            // a new one.
-            if on.is_none() {
-                let (cx, cy) = e.center();
-                let colour = theme::fade(theme::t().aqua, 45, self.ground());
-                for a in e.arrows(super::ARROW_GAP) {
-                    let (dx, dy) = (a.0 - cx, a.1 - cy);
-                    let len = dx.hypot(dy).max(0.001);
-                    paint_mark(ctx, a, Mark::Arrow(colour, (dx / len, dy / len)), flip);
-                }
-            }
-        }
+        // A shape's own eight handles, and the arrows just outside them, are never drawn in
+        // this braille pass — they are a control, not the diagram, and paint once, always in
+        // line art, after `render`'s ink branch: see `wire::paint_handles`.
         for e in self.doc.elements_in_order() {
             if !self.doc.element_visible(e.id) {
                 continue;
@@ -275,17 +305,13 @@ impl Scene<'_> {
             if !e.outline {
                 continue;
             }
+            // An element overridden to the other ink is left for `render`'s secondary pass —
+            // drawing it here would merge it into this braille canvas's own composite.
+            if self.ink_of(e) != super::wire::Ink::Braille {
+                continue;
+            }
             let colour = self.colour_of(e.id, e.kind.layer());
-            for prim in shapes::patterned(shapes::drawn(page, e, SKETCH), e.drawn_line()) {
-                paint_primitive(ctx, prim, colour, flip);
-            }
-            // A thicker outline is the same outline drawn again a braille dot out — and, for
-            // the thickest, a dot in as well — so it stays the shape it was, only heavier.
-            for d in [0.5, -0.5].iter().take(e.stroke.saturating_sub(1) as usize) {
-                for prim in shapes::patterned(shapes::drawn_at(page, e, e.x - d, e.y - d / 2.0, e.w + 2.0 * d, e.h + d, SKETCH), e.drawn_line()) {
-                    paint_primitive(ctx, prim, colour, flip);
-                }
-            }
+            paint_shape_outline(ctx, page, e, colour, flip);
         }
         // The page's edge, dashed and dim, when the diagram is laid out on paper.
         if page.page_view {
@@ -330,30 +356,35 @@ impl Scene<'_> {
                 Some((Target::Element(id), s)) if id == e.id => format!("{s}█"),
                 _ => e.label.clone(),
             };
+            let shape = e.kind.shape();
+            // The outline's own silhouette, sampled once — masks the fill below and the
+            // cursor's own highlight to the shape itself. `None` for a plain label or a
+            // figure too sparse to have an inside of its own: those keep the whole box.
+            let outline = (!composite && !matches!(shape, crate::ontology::Shape::Text | crate::ontology::Shape::StickFigure))
+                .then(|| shapes::drawn(&self.doc.metadata.page, e, SKETCH));
             // A fill of its own tints the inside: the colour laid over the ground at a third
-            // of its opacity, so the label and the grid's absence both read.
-            if let (Some(c), false, false) = (e.fill.colour(), composite, matches!(e.kind.shape(), crate::ontology::Shape::Text | crate::ontology::Shape::Dashed)) {
+            // of its opacity, so the label and the grid's absence both read. `auto`, on any
+            // architecture layer, is the layer's own pastel — the same colour the exports
+            // already give it, so a diagram reads filled on screen too; a plain sketch
+            // shape's `auto` stays untinted, the blank whiteboard box it always was.
+            let rgb = match e.fill {
+                Fill::Colour(c) => Some(c.on(theme::mode() == theme::Mode::Light)),
+                Fill::Auto if e.kind.layer() != Layer::Sketch => e.kind.layer().pastel(),
+                _ => None,
+            };
+            if let Some(rgb) = rgb
+                && !composite
+                && !matches!(shape, crate::ontology::Shape::Text | crate::ontology::Shape::Dashed | crate::ontology::Shape::StickFigure)
+            {
                 let Color::Rgb(gr, gg, gb) = self.ground() else { unreachable!("the ground is always rgb") };
-                let t = crate::ontology::mix(c.on(theme::mode() == theme::Mode::Light), [gr, gg, gb], 1.0 - 0.35 * e.drawn_opacity() as f64 / 100.0);
+                let t = crate::ontology::mix(rgb, [gr, gg, gb], 1.0 - 0.35 * e.drawn_opacity() as f64 / 100.0);
                 let tint = Color::Rgb(t[0], t[1], t[2]);
-                for wy in (e.y as i64 + 1)..(e.bottom() as i64) {
-                    for wx in (e.x as i64 + 1)..(e.right() as i64) {
-                        if let (Some(x), Some(y)) = (col(wx as f64), row(wy as f64)) {
-                            buf[(x, y)].set_bg(tint);
-                        }
-                    }
-                }
+                tint_inside(e, outline.as_deref(), col, row, buf, tint);
             }
             // The cursor's shape is INVERSE: its inside tinted, its label black on yellow. An
             // outline in a different colour was too subtle to find on a busy diagram.
             if on && !composite && self.focus_rel.is_none() {
-                for wy in (e.y as i64 + 1)..(e.bottom() as i64) {
-                    for wx in (e.x as i64 + 1)..(e.right() as i64) {
-                        if let (Some(x), Some(y)) = (col(wx as f64), row(wy as f64)) {
-                            buf[(x, y)].set_bg(theme::t().hilite);
-                        }
-                    }
-                }
+                tint_inside(e, outline.as_deref(), col, row, buf, theme::t().hilite);
             }
             let plain = !typing && !on;
             let label_style = if typing {
@@ -397,7 +428,9 @@ impl Scene<'_> {
                 // The compartment: a rule under the header, then a row per property, in
                 // the kind's colour dimmed — the shape's own text, not its label.
                 if let Some(ry) = e.header_rule() {
-                    if self.ink == super::wire::Ink::Braille {
+                    // In lines, wire::paint (or, overridden, wire::paint_one) already merged
+                    // this rule into the box's own sides — drawing it again here would double it.
+                    if self.ink_of(e) == super::wire::Ink::Braille {
                         let rule: String = "─".repeat((e.w as usize).saturating_sub(2));
                         put(buf, e.x + 1.0, ry, &rule, Style::new().fg(self.colour_of(e.id, e.kind.layer())));
                     }
@@ -555,6 +588,45 @@ pub fn dress(base: Style, t: &crate::model::TextStyle, plain: bool, ground: Colo
     s
 }
 
+/// A tint over the inside of `e`'s own box — its fill, or the cursor's highlight — a cell in
+/// from every side either way. `mask`, when there is one, is the shape's own outline: each row
+/// is clipped to where that row actually reaches, so a curve or a point never bleeds into the
+/// corner it doesn't cover. `None` — a plain label, or a figure too sparse to have an inside of
+/// its own — keeps the whole box, the way every shape did before there was a mask to ask.
+fn tint_inside(e: &Element, mask: Option<&[CurvePrimitive]>, col: impl Fn(f64) -> Option<u16>, row: impl Fn(f64) -> Option<u16>, buf: &mut Buffer, tint: Color) {
+    for wy in (e.y as i64 + 1)..(e.bottom() as i64) {
+        let span = match mask {
+            Some(outline) => shapes::row_span(outline, wy as f64 + 0.5).map(|(lo, hi)| (lo.max(e.x + 1.0), hi.min(e.right() - 1.0))),
+            None => Some((e.x + 1.0, e.right() - 1.0)),
+        };
+        let Some((lo, hi)) = span else { continue };
+        if lo >= hi {
+            continue;
+        }
+        for wx in (lo.ceil() as i64)..=(hi.floor() as i64) {
+            if let (Some(x), Some(y)) = (col(wx as f64), row(wy as f64)) {
+                buf[(x, y)].set_bg(tint);
+            }
+        }
+    }
+}
+
+/// One shape's own outline — never a relation, a port or a highlight — so [`Scene::ink_of`]'s
+/// secondary pass can draw a single overridden element without the rest of what a normal pass
+/// over every element would touch.
+fn paint_shape_outline(ctx: &mut Context, page: &crate::model::Page, e: &Element, colour: Color, flip: impl Fn(f64) -> f64 + Copy) {
+    for prim in shapes::patterned(shapes::drawn(page, e, SKETCH), e.drawn_line()) {
+        paint_primitive(ctx, prim, colour, flip);
+    }
+    // A thicker outline is the same outline drawn again a braille dot out — and, for the
+    // thickest, a dot in as well — so it stays the shape it was, only heavier.
+    for d in [0.5, -0.5].iter().take(e.stroke.saturating_sub(1) as usize) {
+        for prim in shapes::patterned(shapes::drawn_at(page, e, e.x - d, e.y - d / 2.0, e.w + 2.0 * d, e.h + d, SKETCH), e.drawn_line()) {
+            paint_primitive(ctx, prim, colour, flip);
+        }
+    }
+}
+
 fn paint_primitive(ctx: &mut Context, prim: CurvePrimitive, color: Color, flip: impl Fn(f64) -> f64) {
     match prim {
         CurvePrimitive::Points(points) => {
@@ -569,18 +641,14 @@ fn paint_primitive(ctx: &mut Context, prim: CurvePrimitive, color: Color, flip: 
     }
 }
 
-/// A node mark: what a handle or a link's node looks like.
+/// A relation node's mark — a handle's own marks are `wire::paint_handles`' fixed glyphs,
+/// always line art, not this braille one.
 #[derive(Clone, Copy)]
 enum Mark {
     /// A small hollow diamond.
     Plain(Color),
-    /// A ring — something is attached here.
-    Patched(Color),
     /// A filled diamond in a ring — the one the cursor is on.
     Focused(Color),
-    /// A small hollow triangle pointing away from its shape, along the given unit vector —
-    /// a hover arrow inviting a new connected shape that way.
-    Arrow(Color, Point),
 }
 
 /// Paint a mark at `(cx, cy)`, in braille. Sizes are in cells, the aspect corrected so a
@@ -590,10 +658,6 @@ fn paint_mark(ctx: &mut Context, (cx, cy): Point, mark: Mark, flip: impl Fn(f64)
     let ring = |rx: f64, ry: f64| CurvePrimitive::Points(shapes::ellipse_points(cx, cy, rx, ry, 0.0, std::f64::consts::TAU, 48));
     match mark {
         Mark::Plain(c) => paint_primitive(ctx, CurvePrimitive::Lines(diamond(1.0, 0.5)), c, flip),
-        Mark::Patched(c) => {
-            paint_primitive(ctx, ring(1.4, 0.7), c, flip);
-            paint_primitive(ctx, CurvePrimitive::Lines(diamond(0.5, 0.25)), c, flip);
-        }
         Mark::Focused(c) => {
             let (rx, ry) = (1.6, 0.8);
             // Filled: nested diamonds down to the centre, and a ring round the lot.
@@ -601,17 +665,6 @@ fn paint_mark(ctx: &mut Context, (cx, cy): Point, mark: Mark, flip: impl Fn(f64)
                 paint_primitive(ctx, CurvePrimitive::Lines(diamond(rx * k, ry * k)), c, flip);
             }
             paint_primitive(ctx, ring(rx + 0.9, ry + 0.45), c, flip);
-        }
-        Mark::Arrow(c, (ux, uy)) => {
-            // Aspect-corrected the same way a diamond is: the y-reach of the tip and base
-            // halved, so the triangle points true rather than leaning with the cell shape.
-            let (len, wid) = (0.8, 0.55);
-            let tip = (cx + ux * len, cy + uy * len * 0.5);
-            let base = (cx - ux * len * 0.4, cy - uy * len * 0.2);
-            let (px, py) = (-uy, ux);
-            let a = (base.0 + px * wid, base.1 + py * wid * 0.5);
-            let b = (base.0 - px * wid, base.1 - py * wid * 0.5);
-            paint_primitive(ctx, CurvePrimitive::Lines(vec![(tip, a), (a, b), (b, tip)]), c, flip);
         }
     }
 }
@@ -869,6 +922,108 @@ mod tests {
             .filter(|&(x, y)| buf[(x, y)].fg == theme::t().yellow && buf[(x, y)].symbol().chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)))
             .count();
         assert!(yellow_braille >= 4, "the focused node is a braille mark, several cells of it: {yellow_braille}");
+    }
+
+    #[test]
+    fn a_hover_handle_stays_line_art_even_when_the_document_s_own_ink_is_braille() {
+        let mut doc = Document::default();
+        let a = doc.add(ShapeKind::Box, "a", 10.0, 6.0);
+        let out = screen(
+            Scene {
+                doc: &doc,
+                cursor: None,
+                focus_rel: None,
+                focus_node: Node::Centre,
+                holding: None,
+                picked: &[],
+                camera: (0.0, 0.0),
+                letters: None,
+                insert: None,
+                refused: &[],
+                reshape: None,
+                hover: Some(a),
+                marquee: None,
+                labels: false,
+                grid: false,
+                ink: crate::ui::wire::Ink::Braille,
+            },
+            60,
+            20,
+        );
+        assert!(out.contains('◇'), "an unpatched hover handle is a fixed line-art glyph, not a braille mark, whatever the document's own ink: {out}");
+        assert!(out.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)), "the shape's own outline is still braille — only the control changed: {out}");
+    }
+
+    #[test]
+    fn an_architecture_shape_s_auto_fill_tints_the_screen_but_a_basic_shape_s_stays_off() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut doc = Document::default();
+        let arch = doc.add(ShapeKind::ApplicationComponent, "Billing", 0.0, 0.0);
+        let plain = doc.add(ShapeKind::Box, "note", 40.0, 0.0);
+        let scene = Scene {
+            doc: &doc,
+            cursor: None,
+            focus_rel: None,
+            focus_node: Node::Centre,
+            holding: None,
+            picked: &[],
+            camera: (0.0, 0.0),
+            letters: None,
+            insert: None,
+            refused: &[],
+            reshape: None,
+            hover: None,
+            marquee: None,
+            labels: false,
+            grid: false,
+            ink: crate::ui::wire::Ink::Braille,
+        };
+        let mut term = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        term.draw(|f| f.render_widget(scene, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let arch_e = doc.element(arch).unwrap();
+        let tinted = (arch_e.x as u16 + 2..arch_e.right() as u16).any(|x| buf[(x, arch_e.y as u16 + 2)].bg != Color::Reset);
+        assert!(tinted, "an architecture-layer shape's own auto fill is the layer's pastel on screen, not just in the exports");
+        let plain_e = doc.element(plain).unwrap();
+        let untinted = (plain_e.x as u16 + 2..plain_e.right() as u16).all(|x| buf[(x, plain_e.y as u16 + 2)].bg == Color::Reset);
+        assert!(untinted, "a plain sketch shape's auto fill is still nothing on screen — the blank whiteboard box it always was");
+    }
+
+    #[test]
+    fn a_curved_shape_s_fill_stays_inside_its_own_outline_and_never_bleeds_into_the_corner() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut doc = Document::default();
+        let id = doc.add(ShapeKind::Ellipse, "", 0.0, 0.0);
+        {
+            let e = doc.element_mut(id).unwrap();
+            e.w = 20.0;
+            e.h = 10.0;
+            e.fill = crate::model::Fill::Colour(crate::ontology::Colour::Hex([80, 80, 200]));
+        }
+        let scene = Scene {
+            doc: &doc,
+            cursor: None,
+            focus_rel: None,
+            focus_node: Node::Centre,
+            holding: None,
+            picked: &[],
+            camera: (0.0, 0.0),
+            letters: None,
+            insert: None,
+            refused: &[],
+            reshape: None,
+            hover: None,
+            marquee: None,
+            labels: false,
+            grid: false,
+            ink: crate::ui::wire::Ink::Braille,
+        };
+        let mut term = Terminal::new(TestBackend::new(30, 15)).unwrap();
+        term.draw(|f| f.render_widget(scene, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        assert_ne!(buf[(10, 5)].bg, Color::Reset, "the middle of the ellipse is filled");
+        assert_eq!(buf[(1, 1)].bg, Color::Reset, "the box's own corner, well outside the ellipse's own curve, stays unfilled");
+        assert_eq!(buf[(18, 1)].bg, Color::Reset, "the opposite corner too");
     }
 
     #[test]

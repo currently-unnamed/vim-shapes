@@ -1,0 +1,115 @@
+{
+  "version": 3,
+  "current": 0,
+  "tabs": [
+    {
+      "name": "ontology-alignment",
+      "diagram": {
+        "version": 2,
+        "metadata": {
+          "title": "Ontology alignment — merging domain ontologies",
+          "view": "alignment"
+        },
+        "elements": [
+          {
+            "id": 0,
+            "kind": "object_type",
+            "label": "Customer (CRM source)",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 22.0,
+            "h": 6.0
+          },
+          {
+            "id": 1,
+            "kind": "object_type",
+            "label": "Client (billing source)",
+            "x": 30.0,
+            "y": 0.0,
+            "w": 22.0,
+            "h": 6.0
+          },
+          {
+            "id": 2,
+            "kind": "cco_person",
+            "label": "Person",
+            "x": 0.0,
+            "y": 9.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 3,
+            "kind": "cco_person",
+            "label": "Person",
+            "x": 68.0,
+            "y": 4.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 4,
+            "kind": "cco_agent",
+            "label": "Agent",
+            "x": 92.0,
+            "y": 4.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 5,
+            "kind": "bfo_material_entity",
+            "label": "Material Entity",
+            "x": 68.0,
+            "y": 12.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 6,
+            "kind": "bfo_independent_continuant",
+            "label": "Independent Continuant",
+            "x": 92.0,
+            "y": 12.0,
+            "w": 16.0,
+            "h": 5.0
+          }
+        ],
+        "relations": [
+          {
+            "id": 0,
+            "kind": "subsumed_by",
+            "from": 0,
+            "to": 2
+          },
+          {
+            "id": 1,
+            "kind": "subsumed_by",
+            "from": 1,
+            "to": 2
+          },
+          {
+            "id": 2,
+            "kind": "subsumed_by",
+            "from": 3,
+            "to": 4
+          },
+          {
+            "id": 3,
+            "kind": "subsumed_by",
+            "from": 4,
+            "to": 5
+          },
+          {
+            "id": 4,
+            "kind": "subsumed_by",
+            "from": 5,
+            "to": 6
+          }
+        ],
+        "next_element_id": 7,
+        "next_relation_id": 5
+      }
+    }
+  ]
+}

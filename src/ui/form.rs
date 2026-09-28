@@ -8,7 +8,7 @@
 
 use super::canvas::Target;
 use crate::fonts;
-use crate::model::{Align, Document, Element, ElementId, Fill, GridStyle, Node, Page, Paper, Raise, Relation, Status, VAlign, Visibility};
+use crate::model::{Align, Document, Element, ElementId, ElementInk, Fill, GridStyle, Node, Page, Paper, Raise, Relation, Status, VAlign, Visibility};
 use crate::ontology::{Colour, End, EndSize, LineStyle, Paint, RelationKind, Route, ShapeKind, View, LOOKS};
 
 /// What sort of value a field holds — which decides how it is typed, cycled and checked.
@@ -51,6 +51,10 @@ pub enum Unit {
     Look,
     /// `auto` (the layer's own), `none`, or a colour.
     Fill,
+    /// `auto` (the layer's own) or `none`. An architecture shape's fill is a switch, not a
+    /// palette: the colour is what tells you which layer it's in, so only a plain sketch
+    /// shape — with no layer to say — may pick a colour of its own.
+    LayerFill,
     /// Ten to a hundred per cent.
     Percent,
     /// Straight, orthogonal or curved.
@@ -59,6 +63,8 @@ pub enum Unit {
     EndSize,
     /// Dots or lines.
     GridStyle,
+    /// Auto (the document's own `:ink`), lines or braille — this shape only.
+    Ink,
     /// Active, experimental or deprecated.
     Status,
     /// Prominent, normal or hidden.
@@ -89,10 +95,12 @@ impl Unit {
             Unit::Orientation => "portrait / landscape",
             Unit::Look => "a fill and line colour that go together",
             Unit::Fill => "auto (the layer's), none, a colour — enter picks",
+            Unit::LayerFill => "auto (the layer's) or none — the colour marks the layer",
             Unit::Percent => "per cent, 10 to 100",
             Unit::Route => "straight / orthogonal / curved",
             Unit::EndSize => "small / normal / large",
             Unit::GridStyle => "auto (dots here, ruled on paper) / dots / lines",
+            Unit::Ink => "auto (the document's), lines or braille — this shape only",
             Unit::Status => "active / experimental / deprecated",
             Unit::Visibility => "prominent / normal / hidden",
         }
@@ -118,10 +126,12 @@ impl Unit {
             Unit::Orientation => ["portrait", "landscape"].iter().map(|s| s.to_string()).collect(),
             Unit::Look => LOOKS.iter().map(|l| l.0.to_string()).collect(),
             Unit::Fill => ["auto", "none"].iter().map(|s| s.to_string()).chain(Paint::ALL.iter().map(|p| p.name().to_string())).collect(),
+            Unit::LayerFill => ["auto", "none"].iter().map(|s| s.to_string()).collect(),
             Unit::Percent => (1..=10).map(|n| (n * 10).to_string()).collect(),
             Unit::Route => Route::ALL.iter().map(|r| r.name().to_string()).collect(),
             Unit::EndSize => EndSize::ALL.iter().map(|e| e.name().to_string()).collect(),
             Unit::GridStyle => GridStyle::ALL.iter().map(|g| g.name().to_string()).collect(),
+            Unit::Ink => ElementInk::ALL.iter().map(|i| i.name().to_string()).collect(),
             Unit::Status => Status::ALL.iter().map(|v| v.name().to_string()).collect(),
             Unit::Visibility => Visibility::ALL.iter().map(|v| v.name().to_string()).collect(),
             // Layers are the document's, so the sheet asks for them with `layer_choices`.
@@ -506,12 +516,13 @@ fn element_fields(e: &Element) -> Vec<Field> {
     }
     let mut v = vec![
         f(Style, "look", Unit::Look, e.look().to_string()),
-        f(Style, "fill", Unit::Fill, e.fill.name()),
+        f(Style, "fill", if e.kind.is_sketch() { Unit::Fill } else { Unit::LayerFill }, e.fill.name()),
         f(Style, "outline", Unit::YesNo, yes_no(e.outline)),
         f(Style, "colour", Unit::Colour, e.color.map(|p| p.name().to_string()).unwrap_or_default()),
         f(Style, "line", Unit::Line, e.line.name().to_string()),
         f(Style, "stroke", Unit::Width, e.stroke.to_string()),
         f(Style, "opacity", Unit::Percent, e.opacity.to_string()),
+        f(Style, "ink", Unit::Ink, e.ink.name().to_string()),
         f(Text, "label", Unit::Text, e.label.clone()),
         f(Text, "font", Unit::Font, e.text.font.clone().unwrap_or_default()),
         f(Text, "size", Unit::Px, e.text.size.map(|s| s.to_string()).unwrap_or_default()),
@@ -693,8 +704,19 @@ pub fn apply(doc: &mut Document, target: Target, name: &str, value: &str) -> Res
                         _ => return Err(format!("stroke is 1, 2 or 3 dots, not {value:?}")),
                     }
                 }
-                "look" => e.set_look(value)?,
-                "fill" => e.fill = Fill::parse(value).ok_or_else(|| format!("fill is auto, none, or a colour — a name or a hex — not {value:?}"))?,
+                "look" => {
+                    if !e.kind.is_sketch() {
+                        return Err("an architecture shape has no look of its own — fill is auto or none, and the layer sets the rest; a plain sketch shape can pick one of the eight looks".into());
+                    }
+                    e.set_look(value)?
+                }
+                "fill" => {
+                    let f = Fill::parse(value).ok_or_else(|| format!("fill is auto, none, or a colour — a name or a hex — not {value:?}"))?;
+                    if matches!(f, Fill::Colour(_)) && !e.kind.is_sketch() {
+                        return Err("an architecture shape's fill is auto or none — the colour is what says which layer it's in; a plain sketch shape can take any colour".into());
+                    }
+                    e.fill = f;
+                }
                 "outline" => e.outline = parse_yes_no(value)?,
                 "line" => e.line = LineStyle::parse(value).ok_or_else(|| format!("line is solid, dashed or dotted, not {value:?}"))?,
                 "opacity" => {
@@ -704,6 +726,7 @@ pub fn apply(doc: &mut Document, target: Target, name: &str, value: &str) -> Res
                     }
                     e.opacity = n;
                 }
+                "ink" => e.ink = ElementInk::parse(value).ok_or_else(|| format!("ink is auto, lines or braille, not {value:?}"))?,
                 other => return Err(format!("no field {other:?}")),
             }
         }
@@ -840,7 +863,7 @@ mod tests {
         let id = doc.add(ShapeKind::Node, "db", 3.0, 4.0);
         let fs = fields(&doc, Target::Element(id)).unwrap();
         let by = |t: Tab| fs.iter().filter(|f| f.tab == t).map(|f| f.name).collect::<Vec<_>>();
-        assert_eq!(by(Tab::Style), ["look", "fill", "outline", "colour", "line", "stroke", "opacity"]);
+        assert_eq!(by(Tab::Style), ["look", "fill", "outline", "colour", "line", "stroke", "opacity", "ink"]);
         assert_eq!(by(Tab::Text), ["label", "font", "size", "bold", "italic", "underline", "text colour", "label band", "wrap", "label width", "padding", "align", "valign"]);
         assert_eq!(by(Tab::Arrange), ["kind", "x", "y", "width", "height", "skew x", "skew y", "snap to grid", "to front", "to back", "bring forward", "send backward", "layer", "locked"]);
         assert_eq!(fs.iter().find(|f| f.name == "kind").unwrap().value, "node");
@@ -1042,6 +1065,23 @@ mod tests {
         let app = doc.add(ShapeKind::ApplicationComponent, "b", 0.0, 10.0);
         assert_eq!(doc.element(app).unwrap().fill_on(true), Some([181, 255, 255]));
         assert_eq!(doc.element(id).unwrap().fill_on(true), Some([255, 255, 255]));
+    }
+
+    #[test]
+    fn an_architecture_shapes_fill_is_auto_or_none_never_a_colour() {
+        let mut doc = Document::default();
+        let id = doc.add(ShapeKind::ApplicationComponent, "svc", 0.0, 0.0);
+        let field = |doc: &Document, n: &str| fields(doc, Target::Element(id)).unwrap().into_iter().find(|f| f.name == n).unwrap();
+        assert_eq!(field(&doc, "fill").unit, Unit::LayerFill, "an architecture shape's fill is a switch, not a picker");
+        apply(&mut doc, Target::Element(id), "fill", "none").unwrap();
+        assert_eq!(doc.element(id).unwrap().fill, Fill::None);
+        apply(&mut doc, Target::Element(id), "fill", "").unwrap();
+        assert_eq!(doc.element(id).unwrap().fill, Fill::Auto, "blank is auto");
+        assert!(apply(&mut doc, Target::Element(id), "fill", "purple").unwrap_err().contains("the colour is what says which layer"));
+        assert!(apply(&mut doc, Target::Element(id), "fill", "#abc").unwrap_err().contains("the colour is what says which layer"));
+        assert!(apply(&mut doc, Target::Element(id), "look", "blue").unwrap_err().contains("has no look of its own"));
+        assert_eq!(doc.element(id).unwrap().fill, Fill::Auto, "a refused fill leaves it as it was");
+        assert_eq!(Unit::LayerFill.choices().unwrap(), ["auto", "none"]);
     }
 
     #[test]

@@ -97,6 +97,52 @@ pub fn outline(shape: Shape, x: f64, y: f64, w: f64, h: f64) -> Vec<CurvePrimiti
     }
 }
 
+/// The horizontal span this outline's own edges reach at world row `row` — the shape's true
+/// left and right there, not its bounding box's, so a fill can stay inside a curve or a point
+/// instead of tinting the corner the outline never reaches. A `Lines` primitive's pairs are
+/// each a real edge; a `Points` primitive is a curve sampled finely, so only a pair close
+/// enough to be the next step along it — never a jump to some other arc entirely — counts as
+/// one, the same gate `wire::shape`'s own fallback uses to tell the two apart. Two crossings
+/// on the same side (a cloud's own bumps, overlapping) take the outermost: the hull at that
+/// row, the same simplification the picture export's fill already makes, rather than each
+/// bump's own notch.
+pub fn row_span(prims: &[CurvePrimitive], row: f64) -> Option<(f64, f64)> {
+    let mut span: Option<(f64, f64)> = None;
+    let mut edge = |a: Point, b: Point| {
+        if (a.1 - row) * (b.1 - row) > 0.0 {
+            return;
+        }
+        let (x0, x1) = if (b.1 - a.1).abs() < f64::EPSILON {
+            (a.0, b.0)
+        } else {
+            let x = a.0 + (b.0 - a.0) * (row - a.1) / (b.1 - a.1);
+            (x, x)
+        };
+        let (lo, hi) = (x0.min(x1), x0.max(x1));
+        span = Some(match span {
+            Some((l, h)) => (l.min(lo), h.max(hi)),
+            None => (lo, hi),
+        });
+    };
+    for prim in prims {
+        match prim {
+            CurvePrimitive::Lines(ls) => {
+                for &(a, b) in ls {
+                    edge(a, b);
+                }
+            }
+            CurvePrimitive::Points(ps) => {
+                for w in ps.windows(2) {
+                    if (w[0].0 - w[1].0).abs() <= 2.0 && (w[0].1 - w[1].1).abs() <= 1.0 {
+                        edge(w[0], w[1]);
+                    }
+                }
+            }
+        }
+    }
+    span
+}
+
 fn rectangle_lines(x: f64, y: f64, w: f64, h: f64) -> Vec<(Point, Point)> {
     let (r, b) = (x + w, y + h);
     vec![((x, y), (r, y)), ((r, y), (r, b)), ((r, b), (x, b)), ((x, b), (x, y))]
@@ -312,6 +358,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn row_span_never_panics_and_never_reaches_past_the_box() {
+        for s in ALL {
+            let prims = outline(s, 3.0, 4.0, 12.0, 5.0);
+            for r in 0..12 {
+                let row = 4.0 + r as f64 * 0.5;
+                if let Some((lo, hi)) = row_span(&prims, row) {
+                    assert!(lo <= hi, "{s:?} at row {row}: {lo} > {hi}");
+                    // A wave may dip half a cell past its edge, same as the outline itself does.
+                    assert!(lo >= 2.4 && hi <= 15.6, "{s:?} at row {row}: ({lo}, {hi})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn row_span_hugs_a_rectangle_s_full_width_and_a_diamond_s_and_an_ellipse_s_taper() {
+        let rect = outline(Shape::Rectangle, 0.0, 0.0, 10.0, 6.0);
+        assert_eq!(row_span(&rect, 3.0), Some((0.0, 10.0)), "a rectangle is the same width top to bottom");
+        assert_eq!(row_span(&rect, -1.0), None, "above the box, nothing");
+
+        let diamond = outline(Shape::Diamond, 0.0, 0.0, 10.0, 6.0);
+        let (lo, hi) = row_span(&diamond, 3.0).expect("the diamond's own widest row");
+        assert!((hi - lo - 10.0).abs() < 0.01, "at its centre the diamond is as wide as its box: {lo} {hi}");
+        let (lo, hi) = row_span(&diamond, 0.0).expect("the diamond's own point");
+        assert!((hi - lo).abs() < 0.01, "at its very top the diamond is a point: {lo} {hi}");
+
+        let ellipse = outline(Shape::Ellipse, 0.0, 0.0, 10.0, 6.0);
+        let (elo, ehi) = row_span(&ellipse, 3.0).expect("the ellipse's own widest row");
+        let (dlo, dhi) = row_span(&diamond, 3.0).expect("the diamond's own widest row");
+        assert!((elo - dlo).abs() < 0.5 && (ehi - dhi).abs() < 0.5, "both reach the same box at its middle: ellipse ({elo},{ehi}) diamond ({dlo},{dhi})");
+        let (elo, ehi) = row_span(&ellipse, 0.5).expect("a row near the ellipse's own top");
+        assert!(ehi - elo < 10.0, "a curve is narrower near its cap than at its middle: {elo} {ehi}");
     }
 
     #[test]

@@ -608,6 +608,11 @@ pub fn paint(scene: &Scene, area: Rect, buf: &mut Buffer) {
         if !doc.element_visible(e.id) || !e.outline {
             continue;
         }
+        // An element overridden to braille is left for `canvas::Scene::render`'s secondary
+        // pass — drawing it here would merge its outline into this Grid's own connectivity.
+        if scene.ink_of(e) != Ink::Lines {
+            continue;
+        }
         let colour = scene.colour_of(e.id, e.kind.layer());
         shape(&mut g, e, page.shape(e.kind), colour);
         // The compartment's rule joins the box's sides.
@@ -622,7 +627,8 @@ pub fn paint(scene: &Scene, area: Rect, buf: &mut Buffer) {
         g.rect(0, 0, w as i64, h as i64, Weight::Dashed, false, theme::t().structure);
     }
 
-    // The focused relation's nodes, and the handles inside a shape, as marks.
+    // The focused relation's own nodes, as marks — a shape's handles are `paint_handles`'s,
+    // drawn once after either ink pass rather than here.
     if let Some(rid) = scene.focus_rel
         && let Some(r) = doc.relation(rid)
         && let Some(route) = doc.route(r)
@@ -633,6 +639,17 @@ pub fn paint(scene: &Scene, area: Rect, buf: &mut Buffer) {
             g.fixed(p.0, p.1, if on { '◆' } else { '◇' }, if on { theme::t().yellow } else { theme::t().bright });
         }
     }
+    splice(&g, area, buf);
+}
+
+/// A shape's own eight handles, and the hover arrows just outside them, painted once after
+/// either ink pass and always in line art — never braille, even when the document's own ink
+/// is. A control is not the diagram, it is the interface for editing it: it should stay the
+/// clearest glyphs the terminal has, not follow a choice made for the sketch underneath it.
+pub(super) fn paint_handles(scene: &Scene, area: Rect, buf: &mut Buffer) {
+    let mut g = Grid::new(area.width, area.height, scene.camera);
+    let doc = scene.doc;
+    let cell = |p: Point| (p.0.round() as i64, p.1.round() as i64);
     // Outside a reshape, the hovered element's handles paint too, unfocused — how a mouse
     // finds them before it has clicked one.
     let handles_on = scene.reshape.map(|(id, on, held)| (id, Some(on), held)).or(scene.hover.map(|id| (id, None, false)));
@@ -652,8 +669,6 @@ pub fn paint(scene: &Scene, area: Rect, buf: &mut Buffer) {
         }
         // A plain hover, not a reshape in hand: an arrow just outside each handle too,
         // faint — click one to add a new connected shape that way, the mouse's own `o`.
-        // The line-art counterpart to `canvas.rs`'s braille `Mark::Arrow`: same positions
-        // (`Element::arrows`), a fixed glyph instead of a drawn one.
         if on.is_none() {
             const GLYPH: [char; 8] = ['↖', '▲', '↗', '▶', '↘', '▼', '↙', '◀'];
             let faint = theme::fade(theme::t().aqua, 45, theme::t().ground);
@@ -663,7 +678,27 @@ pub fn paint(scene: &Scene, area: Rect, buf: &mut Buffer) {
             }
         }
     }
+    splice(&g, area, buf);
+}
 
+/// One element only, in lines, when the rest of the scene is drawn in braille —
+/// [`Element::ink`]'s override. A `Grid` the size of the whole area, but with only this one
+/// shape's outline (and header rule) drawn into it, so nothing merges with a relation or
+/// another element the way the whole-scene `Grid` above lets neighbours merge on purpose.
+pub(super) fn paint_one(scene: &Scene, e: &Element, area: Rect, buf: &mut Buffer) {
+    let mut g = Grid::new(area.width, area.height, scene.camera);
+    let page = &scene.doc.metadata.page;
+    let colour = scene.colour_of(e.id, e.kind.layer());
+    shape(&mut g, e, page.shape(e.kind), colour);
+    if let Some(ry) = e.header_rule() {
+        g.hline(e.x as i64, e.right() as i64, ry as i64, Weight::of(e.drawn_line(), e.stroke), colour);
+    }
+    splice(&g, area, buf);
+}
+
+/// The Grid's glyphs, wherever it has one, into the buffer — the compositing step both the
+/// whole-scene `paint` and the single-element `paint_one` share.
+fn splice(g: &Grid, area: Rect, buf: &mut Buffer) {
     for y in 0..g.height {
         for x in 0..g.width {
             let c = g.get(x, y);

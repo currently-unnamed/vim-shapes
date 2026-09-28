@@ -79,6 +79,29 @@ pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     }
 }
 
+/// A rect of `w × h` anchored at a screen point — a dropdown at the mouse, not centred on the
+/// area — clamped so it stays whole inside `area` rather than running off an edge it opened
+/// near, the way a real one flips instead of clipping.
+pub fn near(area: Rect, at: (u16, u16), w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    let x = at.0.clamp(area.x, area.x + area.width - w);
+    let y = at.1.clamp(area.y, area.y + area.height - h);
+    Rect { x, y, width: w, height: h }
+}
+
+/// Where `panel` (and, if `hinted`, `hint` after it) leave the content — the same rects those
+/// two compute, without a `Buffer` to draw into, so a mouse hit-test can agree with what was
+/// drawn on screen without redrawing it. Keep this in step with `panel`'s and `hint`'s own
+/// arithmetic if either changes.
+pub fn panel_body(area: Rect, hinted: bool) -> Rect {
+    if area.height == 0 || area.width == 0 {
+        return area;
+    }
+    let inner = Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: area.height.saturating_sub(1) };
+    if hinted { Rect { height: inner.height.saturating_sub(1), ..inner } } else { inner }
+}
+
 /// Break `text` into lines no wider than `width`, on spaces. A word longer than the width is
 /// cut rather than overflowing.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -139,6 +162,24 @@ mod tests {
         assert_eq!(inner.height, 9);
         assert_eq!(inner.y, 1);
         assert_eq!(inner.width, 28, "a column of margin either side");
+    }
+
+    #[test]
+    fn panel_body_agrees_with_what_panel_and_hint_actually_draw_into() {
+        let area = Rect::new(2, 3, 30, 10);
+        let mut buf = Buffer::empty(area);
+        let inner = panel(&mut buf, area, "menu", theme::t().sand);
+        assert_eq!(panel_body(area, false), inner, "panel alone");
+        let body = hint(&mut buf, inner, "esc");
+        assert_eq!(panel_body(area, true), body, "panel, then hint's own trim");
+    }
+
+    #[test]
+    fn near_anchors_at_the_point_but_never_runs_off_the_area() {
+        let area = Rect::new(0, 0, 40, 20);
+        assert_eq!(near(area, (5, 5), 10, 4), Rect::new(5, 5, 10, 4), "room to spare: right at the point");
+        assert_eq!(near(area, (38, 19), 10, 4), Rect::new(30, 16, 10, 4), "flips back to stay whole");
+        assert_eq!(near(area, (0, 0), 50, 30), Rect::new(0, 0, 40, 20), "bigger than the area: clamped to it");
     }
 
     #[test]

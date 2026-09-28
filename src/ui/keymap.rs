@@ -105,6 +105,9 @@ pub enum Mode {
     /// Reshaping an element: the cursor is on one of the eight handles of its box, and hjkl
     /// either walk the handles or, with one in hand, drag it.
     Reshape,
+    /// Bending a relation: the cursor is on its one orthogonal turn, and hjkl (whichever
+    /// pair the route actually runs on) pulls it along.
+    Bend,
     /// Presenting: the diagram alone, no chrome, no grid, no cursor — as `:render` writes it.
     Present,
     /// Moving a label: hjkl drag the cursor's label anywhere, the outside of its shape
@@ -135,6 +138,11 @@ pub struct Spot {
     pub relations: usize,
     /// The focused relation is one the rules refuse.
     pub refused: bool,
+    /// The focused relation's one orthogonal turn, and which way it can be pulled —
+    /// `Some(true)` for left/right, `Some(false)` for up/down, `None` for anything with no
+    /// turn to pull at all (a straight or curved route, or nothing focused). See
+    /// `Document::bendable`.
+    pub bend_across: Option<bool>,
 }
 
 /// Everything about where you are that gates a command.
@@ -188,6 +196,10 @@ impl Where {
     }
     fn on_relation(&self) -> bool {
         self.on.is_some_and(|s| s.focus == Focus::Relation)
+    }
+    /// The focused relation has an orthogonal turn `i` can grab.
+    fn bendable(&self) -> bool {
+        self.on.is_some_and(|s| s.bend_across.is_some())
     }
     /// The cursor is on a grouping — something that can be dissolved.
     fn on_group(&self) -> bool {
@@ -291,6 +303,15 @@ pub struct Cmd {
     /// What to replay to run it straight from the menu. Empty means it cannot be — there is
     /// no sense in "move the cursor" from inside a menu that took the cursor keys.
     pub run: &'static [Stroke],
+    /// Whether this belongs in the mouse's right-click menu — a complete, one-shot action, not
+    /// a repeatable motion, a chord that only makes sense mid-gesture, or something the mouse
+    /// can already do more directly by dragging. The `?` cheatsheet ignores this; it is only
+    /// `ctxmenu`'s own filter, on top of `avail` and `runnable`.
+    pub menu: bool,
+    /// The menu's own name for it, two or three words — "Add Shape", not `what`'s full
+    /// sentence, which a one-line dropdown row has no room for. Empty wherever `menu` is
+    /// `false`, since nothing ever reads it there.
+    pub title: &'static str,
 }
 
 impl Cmd {
@@ -316,6 +337,7 @@ pub static COMMANDS: &[Cmd] = &[
             _ if w.mode == Mode::View => "pan the view that way (a count: further)",
             _ if w.mode == Mode::Reshape && w.held => "drag the handle a cell that way",
             _ if w.mode == Mode::Reshape => "move to the next handle that way",
+            _ if w.mode == Mode::Bend => "pull the line's turn that way — only h/l or only j/k does anything, whichever the route runs on",
             _ if w.holding => "carry the relation to the element in that direction",
             _ if w.mode == Mode::Visual => "move to the element in that direction",
             _ => "move to the nearest shape or relation that way (a count hops further)",
@@ -325,8 +347,10 @@ pub static COMMANDS: &[Cmd] = &[
               Stroke::code(KeyCode::Left), Stroke::code(KeyCode::Down),
               Stroke::code(KeyCode::Up), Stroke::code(KeyCode::Right)],
         prefix: None,
-        avail: |w| need(w.mode == Mode::View || (matches!(w.mode, Mode::Normal | Mode::Visual | Mode::Reshape | Mode::Sheet | Mode::Text) && w.on.is_some()), EMPTY),
+        avail: |w| need(w.mode == Mode::View || (matches!(w.mode, Mode::Normal | Mode::Visual | Mode::Reshape | Mode::Bend | Mode::Sheet | Mode::Text) && w.on.is_some()), EMPTY),
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "^h ^j ^k ^l",
@@ -345,6 +369,8 @@ pub static COMMANDS: &[Cmd] = &[
             _ => Avail::No("only inside a shape — i"),
         },
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "^y ^u ^b ^n",
@@ -358,6 +384,8 @@ pub static COMMANDS: &[Cmd] = &[
             _ => Avail::No("only inside a shape — i"),
         },
         run: &[],
+        menu: false,
+        title: "",
     },
     // The same eight directions from the diagram itself, standing on a shape: the linked
     // shape opens out of that side or corner without stepping in first.
@@ -373,6 +401,8 @@ pub static COMMANDS: &[Cmd] = &[
                 .and(need(w.normal() && w.on_body() && !w.holding, ON_BODY))
         },
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "^y ^u ^b ^n",
@@ -383,6 +413,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "g",
@@ -401,6 +433,8 @@ pub static COMMANDS: &[Cmd] = &[
         },
         // A bare `g` outside visual mode is half a command, so the menu does not press it.
         run: &[],
+        menu: true,
+        title: "Group",
     },
     Cmd {
         keys: "gp",
@@ -411,6 +445,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::G),
         avail: |w| need(w.normal() && w.in_group, "not inside a grouping"),
         run: &[Stroke::k('g'), Stroke::k('p')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "gu",
@@ -421,6 +457,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::G),
         avail: |w| need(w.normal() && w.on_group(), "put the cursor on a grouping to dissolve it"),
         run: &[Stroke::k('g'), Stroke::k('u')],
+        menu: true,
+        title: "Ungroup",
     },
     Cmd {
         keys: "a",
@@ -431,6 +469,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && !w.holding, "put the relation down first"),
         run: &[Stroke::k('a')],
+        menu: true,
+        title: "Add Shape",
     },
     Cmd {
         keys: "gg / G",
@@ -441,6 +481,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.on.is_some(), EMPTY),
         run: &[Stroke::k('G')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "gg",
@@ -451,6 +493,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::G),
         avail: |w| need(w.normal() && w.on.is_some(), EMPTY),
         run: &[Stroke::k('g'), Stroke::k('g')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "f",
@@ -461,6 +505,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(matches!(w.mode, Mode::Normal | Mode::Visual) && w.elements > 1, "nothing to jump between yet"),
         run: &[Stroke::k('f')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "/",
@@ -471,6 +517,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.on.is_some(), EMPTY),
         run: &[Stroke::k('/')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "n / N",
@@ -481,6 +529,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.searched, "nothing searched for yet — /"),
         run: &[Stroke::k('n')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "tab",
@@ -500,6 +550,8 @@ pub static COMMANDS: &[Cmd] = &[
             need(s.relations > 0, "no relations here yet — enter starts one")
         },
         run: &[Stroke::code(KeyCode::Tab)],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "gd",
@@ -510,6 +562,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::G),
         avail: |w| need(w.normal() && w.on_relation(), ON_RELATION),
         run: &[Stroke::k('g'), Stroke::k('d')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "^o / ^i",
@@ -520,6 +574,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && (w.can_back || w.can_fwd), "no jumps to retrace yet"),
         run: &[Stroke::ctrl('o')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "zz",
@@ -530,6 +586,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::Zz),
         avail: |w| need(w.normal() && w.on.is_some(), EMPTY),
         run: &[Stroke::k('z'), Stroke::k('z')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "zh zj zk zl",
@@ -540,6 +598,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::Zz),
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "zH zJ zK zL",
@@ -550,6 +610,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::Zz),
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "⇧←↓↑→",
@@ -560,6 +622,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "zv",
@@ -570,6 +634,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::Zz),
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[Stroke::k('z'), Stroke::k('v')],
+        menu: false,
+        title: "",
     },
     // ── relations ───────────────────────────────────────────────────────────
     Cmd {
@@ -584,6 +650,7 @@ pub static COMMANDS: &[Cmd] = &[
             _ if w.mode == Mode::Reshape && w.held => "let go of the handle",
             _ if w.mode == Mode::Reshape && w.patched => "pick up the relation attached here, to move its end",
             _ if w.mode == Mode::Reshape => "take hold of this handle — then hjkl drag it",
+            _ if w.mode == Mode::Bend => "let go of the turn",
             _ if w.holding => "drop the relation on this element, and pick its kind",
             _ if w.on_relation() => "change this relation's kind",
             _ => "take hold of a new relation from this element",
@@ -591,8 +658,10 @@ pub static COMMANDS: &[Cmd] = &[
         section: Section::Relate,
         on: &[Stroke::code(KeyCode::Enter)],
         prefix: None,
-        avail: |w| need(matches!(w.mode, Mode::Text | Mode::View) || (matches!(w.mode, Mode::Normal | Mode::Reshape | Mode::Sheet) && w.on.is_some()), EMPTY),
+        avail: |w| need(matches!(w.mode, Mode::Text | Mode::View) || (matches!(w.mode, Mode::Normal | Mode::Reshape | Mode::Bend | Mode::Sheet) && w.on.is_some()), EMPTY),
         run: &[Stroke::code(KeyCode::Enter)],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "o",
@@ -609,6 +678,8 @@ pub static COMMANDS: &[Cmd] = &[
             _ => need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         },
         run: &[Stroke::k('o')],
+        menu: true,
+        title: "Add Connected Shape",
     },
     Cmd {
         keys: "e",
@@ -619,6 +690,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.on_body() && w.can_expand, "not an ontology element with anything left to expand"),
         run: &[Stroke::k('e')],
+        menu: true,
+        title: "Expand",
     },
     Cmd {
         keys: "r",
@@ -629,6 +702,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.on_relation() && !w.holding, ON_RELATION),
         run: &[Stroke::k('r')],
+        menu: true,
+        title: "Change Kind",
     },
     Cmd {
         keys: "x",
@@ -645,6 +720,8 @@ pub static COMMANDS: &[Cmd] = &[
             _ => need(w.normal() && w.on_relation() && !w.holding, ON_RELATION),
         },
         run: &[Stroke::k('x')],
+        menu: true,
+        title: "Remove Relation",
     },
     // ── editing ─────────────────────────────────────────────────────────────
     Cmd {
@@ -660,6 +737,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need((w.normal() || w.mode == Mode::Sheet) && w.on.is_some() && !w.holding, EMPTY),
         run: &[Stroke::k('t')],
+        menu: true,
+        title: "Rename",
     },
     Cmd {
         keys: "c",
@@ -678,6 +757,8 @@ pub static COMMANDS: &[Cmd] = &[
             _ => need(w.normal() && !w.holding, "put the shape down first"),
         },
         run: &[Stroke::k('c')],
+        menu: true,
+        title: "Properties",
     },
     Cmd {
         keys: "i",
@@ -688,6 +769,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.mode == Mode::Sheet, "only in the sheet — c"),
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "q",
@@ -698,13 +781,15 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.mode == Mode::Sheet, "only in the sheet — c"),
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "d",
         short: "",
         what: |w| match w.mode {
-            Mode::Visual => "delete the picked elements, and their relations — dd, or d then y",
-            _ => "delete this element, and every relation on it (asks first)",
+            Mode::Visual => "cut the picked elements, and their relations — dd, or d then y; p brings them back",
+            _ => "cut this element, and every relation on it (asks first; p brings it back)",
         },
         section: Section::Edit,
         on: &[Stroke::k('d')],
@@ -714,6 +799,8 @@ pub static COMMANDS: &[Cmd] = &[
             _ => need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         },
         run: &[Stroke::k('d')],
+        menu: true,
+        title: "Delete",
     },
     Cmd {
         keys: "H J K L",
@@ -723,6 +810,7 @@ pub static COMMANDS: &[Cmd] = &[
             Mode::Text => "drag the label four cells that way",
             Mode::View => "pan the view half a screen that way",
             Mode::Sheet => "H/L step a number ten at a time, stopping at its limit (a choice: as h/l)",
+            Mode::Bend => "pull the line's turn further that way",
             _ if w.on.is_some_and(|s| s.composite) => "move this box and everything inside it",
             _ => "move this element a cell (a count: that many)",
         },
@@ -732,20 +820,33 @@ pub static COMMANDS: &[Cmd] = &[
         avail: |w| match w.mode {
             Mode::Visual => need(w.picked > 0, "nothing picked yet — space"),
             Mode::Reshape => need(w.held, "take hold of a handle first — enter"),
-            Mode::Text | Mode::View | Mode::Sheet => Avail::Yes,
+            Mode::Bend | Mode::Text | Mode::View | Mode::Sheet => Avail::Yes,
             _ => need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         },
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "i",
         short: "step in",
-        what: |_| "step into this shape — its box, with handles on its sides and corners to drag",
+        what: |w| {
+            if w.bendable() {
+                "grab this line's one turn — hjkl (whichever way it runs) pulls it, enter/esc lets go"
+            } else {
+                "step into this shape — its box, with handles on its sides and corners to drag"
+            }
+        },
         section: Section::Edit,
         on: &[Stroke::k('i')],
         prefix: None,
-        avail: |w| need(w.normal() && w.on_body() && !w.holding, "a relation has no box to step into — c configures it"),
+        avail: |w| {
+            let why = if w.on_relation() { "only an orthogonal line has a turn to grab — the sheet's own route changes the kind" } else { "a relation has no box to step into — c configures it" };
+            need(w.normal() && !w.holding && (w.on_body() || w.bendable()), why)
+        },
         run: &[Stroke::k('i')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "P",
@@ -756,6 +857,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         run: &[Stroke::k('P')],
+        menu: true,
+        title: "Property Browser",
     },
     Cmd {
         keys: "T",
@@ -766,6 +869,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.on.is_some() && !w.holding, EMPTY),
         run: &[Stroke::k('T')],
+        menu: true,
+        title: "Move Label",
     },
     Cmd {
         keys: "0",
@@ -776,6 +881,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.mode == Mode::Text, "only while moving a label — T"),
         run: &[],
+        menu: true,
+        title: "Reset Label",
     },
     Cmd {
         keys: "^H ^J ^K ^L",
@@ -795,6 +902,8 @@ pub static COMMANDS: &[Cmd] = &[
             _ => need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         },
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "< > { }",
@@ -808,6 +917,8 @@ pub static COMMANDS: &[Cmd] = &[
             _ => need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         },
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "- = _ +",
@@ -824,6 +935,8 @@ pub static COMMANDS: &[Cmd] = &[
             _ => need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         },
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "u",
@@ -834,6 +947,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(matches!(w.mode, Mode::Normal | Mode::Visual) && w.can_undo, "nothing to undo"),
         run: &[Stroke::k('u')],
+        menu: true,
+        title: "Undo",
     },
     Cmd {
         keys: "^r",
@@ -844,6 +959,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(matches!(w.mode, Mode::Normal | Mode::Visual) && w.can_redo, "nothing to redo"),
         run: &[Stroke::ctrl('r')],
+        menu: true,
+        title: "Redo",
     },
     Cmd {
         keys: "y",
@@ -860,16 +977,20 @@ pub static COMMANDS: &[Cmd] = &[
             _ => need(w.normal() && w.on_body() && !w.holding, ON_BODY),
         },
         run: &[Stroke::k('y')],
+        menu: true,
+        title: "Copy",
     },
     Cmd {
         keys: "p",
         short: "",
-        what: |_| "paste what was copied, beside the cursor",
+        what: |_| "paste what was last copied or cut, beside the cursor",
         section: Section::Edit,
         on: &[Stroke::k('p')],
         prefix: None,
-        avail: |w| need(w.normal() && w.carrying, "nothing copied yet — y"),
+        avail: |w| need(w.normal() && w.carrying, "nothing copied or cut yet — y or d"),
         run: &[Stroke::k('p')],
+        menu: true,
+        title: "Paste",
     },
     Cmd {
         keys: "v",
@@ -883,6 +1004,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(matches!(w.mode, Mode::Normal | Mode::Visual) && w.on.is_some() && !w.holding, EMPTY),
         run: &[Stroke::k('v')],
+        menu: true,
+        title: "Start Selecting",
     },
     Cmd {
         keys: "space",
@@ -893,6 +1016,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.mode == Mode::Visual && w.on.is_some(), "only while picking — v"),
         run: &[],
+        menu: false,
+        title: "",
     },
     // ── the diagram ─────────────────────────────────────────────────────────
     Cmd {
@@ -904,6 +1029,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.elements > 0, EMPTY),
         run: &[Stroke::k('V')],
+        menu: true,
+        title: "Preview",
     },
     Cmd {
         keys: "\\",
@@ -917,6 +1044,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(matches!(w.mode, Mode::Normal | Mode::Present), ONLY_NORMAL),
         run: &[Stroke::k('\\')],
+        menu: true,
+        title: "Present",
     },
     Cmd {
         keys: ":",
@@ -929,6 +1058,8 @@ pub static COMMANDS: &[Cmd] = &[
         // typed — a label — owns the colon, and esc is one key away there.
         avail: |w| need(w.mode != Mode::Insert, "finish the label first — esc"),
         run: &[Stroke::k(':')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "?",
@@ -939,6 +1070,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.mode != Mode::Manual, "close the manual first — q"),
         run: &[Stroke::k('?')],
+        menu: false,
+        title: "",
     },
     // ── tabs ────────────────────────────────────────────────────────────────
     Cmd {
@@ -950,6 +1083,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[Stroke::ctrl('t')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "gt / gT",
@@ -960,6 +1095,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::G),
         avail: |w| need(w.normal() && w.tabs > 1, "only one tab — ^t makes another"),
         run: &[Stroke::k('g'), Stroke::k('t')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "^w",
@@ -970,6 +1107,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal() && w.tabs > 1, "the only tab — :new starts over, :tabnew adds another"),
         run: &[Stroke::ctrl('w')],
+        menu: false,
+        title: "",
     },
     // ── files ───────────────────────────────────────────────────────────────
     Cmd {
@@ -981,6 +1120,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::Z),
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[Stroke::k('Z'), Stroke::k('Z')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "ZQ",
@@ -991,6 +1132,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: Some(Prefix::Z),
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[Stroke::k('Z'), Stroke::k('Q')],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "W",
@@ -1001,6 +1144,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[Stroke::k('W')],
+        menu: false,
+        title: "",
     },
     // ── modes ───────────────────────────────────────────────────────────────
     Cmd {
@@ -1008,10 +1153,11 @@ pub static COMMANDS: &[Cmd] = &[
         short: "",
         what: |w| match () {
             _ if w.mode == Mode::Insert => "finish the label",
-            _ if w.mode == Mode::Sheet => "the keyboard back to the diagram — the sheet stays, and follows",
+            _ if w.mode == Mode::Sheet => "close the sheet",
             _ if w.mode == Mode::Reshape && w.moving_end => "put the relation's end back where it was",
             _ if w.mode == Mode::Reshape && w.held => "let go of the handle",
             _ if w.mode == Mode::Reshape => "step back out of the shape",
+            _ if w.mode == Mode::Bend => "let go of the turn",
             _ if w.mode == Mode::Text => "leave the label where it is",
             _ if w.mode == Mode::View => "back to the cursor — the view stays where you panned it",
             _ if w.mode == Mode::Present => "back to editing",
@@ -1028,6 +1174,8 @@ pub static COMMANDS: &[Cmd] = &[
             "nothing to back out of",
         ),
         run: &[Stroke::code(KeyCode::Esc)],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "j/k",
@@ -1038,6 +1186,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.mode == Mode::Manual, "only in the manual — :help"),
         run: &[],
+        menu: false,
+        title: "",
     },
     Cmd {
         keys: "tab enter",
@@ -1048,6 +1198,8 @@ pub static COMMANDS: &[Cmd] = &[
         prefix: None,
         avail: |w| need(w.mode == Mode::Manual, "only in the manual — :help"),
         run: &[],
+        menu: false,
+        title: "",
     },
 ];
 
@@ -1119,11 +1271,15 @@ pub(crate) fn sample_wheres() -> Vec<Where> {
         in_group: false,
         can_expand: false,
     };
-    let body = Spot { focus: Focus::Body, composite: false, relations: 0, refused: false };
-    let rel = Spot { focus: Focus::Relation, composite: false, relations: 2, refused: false };
+    let body = Spot { focus: Focus::Body, composite: false, relations: 0, refused: false, bend_across: None };
+    let rel = Spot { focus: Focus::Relation, composite: false, relations: 2, refused: false, bend_across: Some(true) };
+    // A relation with nothing to bend — a straight or curved route — is its own combination:
+    // `i`'s own availability differs between the two, the same way `enter`'s differs by
+    // `held`/`moving_end` in `Reshape`.
+    let rel_straight = Spot { focus: Focus::Relation, composite: false, relations: 2, refused: false, bend_across: None };
     let mut v = vec![base];
-    for mode in [Mode::Normal, Mode::Visual, Mode::Insert, Mode::Manual, Mode::Reshape, Mode::Present, Mode::Sheet, Mode::Text, Mode::View] {
-        for on in [None, Some(body), Some(rel)] {
+    for mode in [Mode::Normal, Mode::Visual, Mode::Insert, Mode::Manual, Mode::Reshape, Mode::Bend, Mode::Present, Mode::Sheet, Mode::Text, Mode::View] {
+        for on in [None, Some(body), Some(rel), Some(rel_straight)] {
             for holding in [false, true] {
                 for held in [false, true] {
                     let carrying = held;
@@ -1186,7 +1342,7 @@ mod tests {
 
     #[test]
     fn the_footer_offers_only_what_works_here() {
-        let body = Spot { focus: Focus::Body, composite: false, relations: 0, refused: false };
+        let body = Spot { focus: Focus::Body, composite: false, relations: 0, refused: false, bend_across: None };
         let w = Where { on: Some(body), ..sample_wheres()[0] };
         let keys: Vec<&str> = footer(&w).iter().map(|c| c.keys).collect();
         assert_eq!(keys[0], "?", "the way to everything else comes first");

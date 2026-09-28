@@ -1,0 +1,72 @@
+{
+  "version": 3,
+  "current": 0,
+  "tabs": [
+    {
+      "name": "digital-twin",
+      "diagram": {
+        "version": 2,
+        "metadata": {
+          "title": "Customer — digital twin",
+          "view": "ontology"
+        },
+        "elements": [
+          {
+            "id": 0,
+            "kind": "object_type",
+            "label": "Customer",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 22.0,
+            "h": 6.0,
+            "properties": [
+              {
+                "name": "customerId",
+                "type": "string",
+                "primary_key": true
+              },
+              {
+                "name": "tier",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "id": 1,
+            "kind": "business_object",
+            "label": "Customer",
+            "x": 0.0,
+            "y": 9.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 2,
+            "kind": "application_component",
+            "label": "CRM System",
+            "x": 30.0,
+            "y": 0.0,
+            "w": 16.0,
+            "h": 5.0
+          }
+        ],
+        "relations": [
+          {
+            "id": 0,
+            "kind": "realization",
+            "from": 0,
+            "to": 1
+          },
+          {
+            "id": 1,
+            "kind": "access",
+            "from": 2,
+            "to": 0
+          }
+        ],
+        "next_element_id": 3,
+        "next_relation_id": 2
+      }
+    }
+  ]
+}

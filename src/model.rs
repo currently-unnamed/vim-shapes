@@ -863,6 +863,11 @@ pub struct Element {
     /// The outline's thickness in braille dots: 1, 2 or 3.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub stroke: u8,
+    /// Which ink this shape's own outline and fill draw in — `auto` follows the document's
+    /// `:ink`. The relation reaching it, its ports, and its cursor highlight are never part of
+    /// this: they stay in the document's ink regardless, so only the shape itself changes.
+    #[serde(default, skip_serializing_if = "ElementInk::is_auto")]
+    pub ink: ElementInk,
     /// An ontology type's rows: an object type's properties, an interface's, an action
     /// type's parameters. Drawn as a compartment under the header; the box grows to hold them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -907,7 +912,10 @@ fn is_solid(l: &LineStyle) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(into = "String", try_from = "String")]
 pub enum Fill {
-    /// The layer's own tint in the exports, and nothing on screen.
+    /// The layer's own tint — in the exports, and, for anything but a plain sketch shape, on
+    /// screen too: an architecture diagram reads filled the way the exports already draw it,
+    /// while a freeform box stays the blank whiteboard shape it always was. See
+    /// [`crate::ui::canvas::Scene::text`] for where "on screen" is decided.
     #[default]
     Auto,
     /// Nothing: the grid shows through.
@@ -995,6 +1003,40 @@ impl Element {
 
 fn is_one(w: &u8) -> bool {
     *w == 1
+}
+
+/// Which ink a shape draws in. `Auto` is the document's own — [`crate::ui::wire::ink()`] — so
+/// this lives here, in the model, rather than as that module's `Ink` with a third variant
+/// bolted on: a file's `auto`/`lines`/`braille` should not change meaning if the global enum's
+/// shape ever does.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ElementInk {
+    #[default]
+    Auto,
+    Lines,
+    Braille,
+}
+
+impl ElementInk {
+    pub const ALL: [ElementInk; 3] = [ElementInk::Auto, ElementInk::Lines, ElementInk::Braille];
+
+    fn is_auto(&self) -> bool {
+        *self == ElementInk::Auto
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ElementInk::Auto => "auto",
+            ElementInk::Lines => "lines",
+            ElementInk::Braille => "braille",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ElementInk> {
+        let want = s.trim().to_ascii_lowercase();
+        ElementInk::ALL.into_iter().find(|i| !want.is_empty() && i.name().starts_with(&want))
+    }
 }
 
 /// How a label is set inside its shape.
@@ -1396,9 +1438,16 @@ impl Document {
     /// corners of an orthogonal one, a sampled curve. Every surface draws from this.
     pub fn route(&self, r: &Relation) -> Option<Vec<(f64, f64)>> {
         let (p1, p2) = self.end_points(r)?;
-        // An orthogonal route leaves squarely from the edge it starts on: down from a top
-        // or bottom edge, across from a side — not along the edge itself.
-        let across_first = self.element(r.from).map(|e| {
+        Some(crate::shapes::route_from(p1, p2, r.notation().route, r.elbow, Some(self.leaves_across(r, p1, p2))))
+    }
+
+    /// Which way an orthogonal route leaves its tail — across, from a side, or down, from a
+    /// top or bottom edge — not along the edge itself. Resolved once here, the same way for
+    /// drawing (`route`) and for deciding which way `bend` pulls, so the two can never
+    /// disagree about which axis a relation's one turn runs along.
+    fn leaves_across(&self, r: &Relation, p1: (f64, f64), p2: (f64, f64)) -> bool {
+        let (dx, dy) = (p2.0 - p1.0, p2.1 - p1.1);
+        let on_edge = self.element(r.from).and_then(|e| {
             let on_top_or_bottom = (p1.1 - e.y).abs() < 0.5 || (p1.1 - e.bottom()).abs() < 0.5;
             let on_side = (p1.0 - e.x).abs() < 0.5 || (p1.0 - e.right()).abs() < 0.5;
             match (on_side, on_top_or_bottom) {
@@ -1407,7 +1456,38 @@ impl Document {
                 _ => None,
             }
         });
-        Some(crate::shapes::route_from(p1, p2, r.notation().route, r.elbow, across_first.flatten()))
+        on_edge.unwrap_or(dx.abs() >= dy.abs() * crate::shapes::ASPECT)
+    }
+
+    /// Whether — and which way — an orthogonal relation's one turn can be pulled: `Some(true)`
+    /// if it leaves across, so the pull is left/right; `Some(false)` if it leaves down, so
+    /// the pull is up/down; `None` for anything with no turn to speak of — a straight or
+    /// curved route has neither `elbow` nor a middle leg to move.
+    pub fn bendable(&self, r: &Relation) -> Option<bool> {
+        if r.notation().route != ontology::Route::Orthogonal {
+            return None;
+        }
+        let (p1, p2) = self.end_points(r)?;
+        Some(self.leaves_across(r, p1, p2))
+    }
+
+    /// Slide an orthogonal relation's one turn by `n` cells — always in the screen direction
+    /// `bend`'s caller means (positive right or down), regardless of which of the two
+    /// elements happens to be `from`: `elbow` itself is a distance along the first leg, not a
+    /// screen coordinate, so the sign it needs depends on which way that leg actually points.
+    pub fn bend(&mut self, rid: RelationId, n: f64) {
+        let Some(r) = self.relation(rid) else { return };
+        let Some((p1, p2)) = self.end_points(r) else { return };
+        if r.notation().route != ontology::Route::Orthogonal {
+            return;
+        }
+        let across = self.leaves_across(r, p1, p2);
+        let (dx, dy) = (p2.0 - p1.0, p2.1 - p1.1);
+        let span = if across { dx } else { dy };
+        let sign = if span == 0.0 { 1.0 } else { span.signum() };
+        let Some(r) = self.relation_mut(rid) else { return };
+        let base = r.elbow.unwrap_or_else(|| (span / 2.0).round() as i64);
+        r.elbow = Some(base + (n * sign).round() as i64);
     }
 
     pub fn add(&mut self, kind: ShapeKind, label: impl Into<String>, x: f64, y: f64) -> ElementId {
@@ -1427,6 +1507,10 @@ impl Document {
             fill: Fill::Auto,
             outline: true,
             line: LineStyle::Solid,
+            // A stick figure is head, arms and legs — all curve and diagonal — which line
+            // art can only stair-step; braille draws the person it is meant to look like
+            // even when the rest of the document reads better in lines.
+            ink: if kind == ShapeKind::StickFigure { ElementInk::Braille } else { ElementInk::Auto },
             opacity: 100,
             skew: 0.0,
             skew_y: 0.0,
@@ -1781,6 +1865,15 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_stick_figure_defaults_to_braille_ink_and_everything_else_to_auto() {
+        let mut doc = Document::default();
+        let figure = doc.add(StickFigure, "Customer", 0.0, 0.0);
+        let box_ = doc.add(Box, "note", 10.0, 0.0);
+        assert_eq!(doc.element(figure).unwrap().ink, ElementInk::Braille, "all curve and diagonal — lines can only stair-step it");
+        assert_eq!(doc.element(box_).unwrap().ink, ElementInk::Auto, "everything else still follows the document's own :ink");
+    }
+
+    #[test]
     fn a_default_text_style_stays_out_of_the_file_and_a_set_one_round_trips() {
         let mut doc = Document::default();
         let a = doc.add(BusinessActor, "Customer", 0.0, 0.0);
@@ -2020,6 +2113,44 @@ mod tests {
         assert_eq!(doc.end_points(&rel).unwrap().0, (8.0, 0.0), "anchored: the top handle");
         assert_eq!(doc.at_port(a, 3), Vec::<RelationId>::new());
         assert_eq!(doc.at_port(a, 1), vec![r]);
+    }
+
+    #[test]
+    fn bend_pulls_an_orthogonal_route_s_one_turn_along_whichever_axis_it_leaves() {
+        let mut doc = Document::default();
+        let a = doc.add(Box, "", 0.0, 0.0);
+        let b = doc.add(Box, "", 40.0, 0.0);
+        let r = doc.connect(RelationKind::Link, a, b).unwrap();
+        let rel = doc.relation(r).unwrap().clone();
+        assert_eq!(doc.bendable(&rel), Some(true), "side to side: the pull is left/right");
+        doc.bend(r, 3.0);
+        let pts = doc.route(doc.relation(r).unwrap()).unwrap();
+        assert_eq!((pts[1].0, pts[2].0), (31.0, 31.0), "half way (28) plus 3, toward b");
+        doc.bend(r, -5.0);
+        let pts = doc.route(doc.relation(r).unwrap()).unwrap();
+        assert_eq!(pts[1].0, 26.0, "3 - 5 more from half way");
+
+        let mut vert = Document::default();
+        let c = vert.add(Box, "", 0.0, 0.0);
+        let d = vert.add(Box, "", 0.0, 40.0);
+        let r2 = vert.connect(RelationKind::Link, c, d).unwrap();
+        let rel2 = vert.relation(r2).unwrap().clone();
+        assert_eq!(vert.bendable(&rel2), Some(false), "top to bottom: the pull is up/down");
+        vert.bend(r2, 4.0);
+        let pts2 = vert.route(vert.relation(r2).unwrap()).unwrap();
+        assert_eq!(pts2[1].1, pts2[2].1, "still square — only the middle leg's y moved");
+
+        // A straight or curved route has no turn at all to pull.
+        let mut straight = Document::default();
+        let e = straight.add(Box, "", 0.0, 0.0);
+        let f = straight.add(Box, "", 40.0, 0.0);
+        let r3 = straight.connect(RelationKind::Link, e, f).unwrap();
+        straight.relation_mut(r3).unwrap().style =
+            Some(crate::ontology::Notation { route: crate::ontology::Route::Straight, ..straight.relation(r3).unwrap().notation() });
+        let rel3 = straight.relation(r3).unwrap().clone();
+        assert_eq!(straight.bendable(&rel3), None);
+        straight.bend(r3, 3.0);
+        assert_eq!(straight.relation(r3).unwrap().elbow, None, "nothing to bend, so nothing changed");
     }
 
     #[test]

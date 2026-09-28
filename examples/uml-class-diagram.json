@@ -1,0 +1,110 @@
+{
+  "version": 3,
+  "current": 0,
+  "tabs": [
+    {
+      "name": "uml-class-diagram",
+      "diagram": {
+        "version": 2,
+        "metadata": {
+          "title": "Library — class diagram",
+          "view": "freeform"
+        },
+        "elements": [
+          {
+            "id": 0,
+            "kind": "box",
+            "label": "Library",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 1,
+            "kind": "box",
+            "label": "Book (title, isbn, available)",
+            "x": 24.0,
+            "y": 0.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 2,
+            "kind": "box",
+            "label": "EBook (fileFormat, downloadUrl)",
+            "x": 48.0,
+            "y": 0.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 3,
+            "kind": "box",
+            "label": "Member (name, memberSince)",
+            "x": 0.0,
+            "y": 8.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 4,
+            "kind": "box",
+            "label": "PremiumMember (discountRate)",
+            "x": 0.0,
+            "y": 16.0,
+            "w": 16.0,
+            "h": 5.0
+          },
+          {
+            "id": 5,
+            "kind": "box",
+            "label": "Loan (dueDate, returned)",
+            "x": 24.0,
+            "y": 8.0,
+            "w": 16.0,
+            "h": 5.0
+          }
+        ],
+        "relations": [
+          {
+            "id": 0,
+            "kind": "aggregation",
+            "from": 0,
+            "to": 1,
+            "tail_label": "1",
+            "head_label": "*"
+          },
+          {
+            "id": 1,
+            "kind": "specialization",
+            "from": 2,
+            "to": 1
+          },
+          {
+            "id": 2,
+            "kind": "specialization",
+            "from": 4,
+            "to": 3
+          },
+          {
+            "id": 3,
+            "kind": "association",
+            "from": 3,
+            "to": 5,
+            "label": "makes"
+          },
+          {
+            "id": 4,
+            "kind": "association",
+            "from": 5,
+            "to": 1,
+            "label": "of"
+          }
+        ],
+        "next_element_id": 6,
+        "next_relation_id": 5
+      }
+    }
+  ]
+}

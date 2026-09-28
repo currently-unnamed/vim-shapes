@@ -1,0 +1,109 @@
+{
+  "version": 3,
+  "current": 0,
+  "tabs": [
+    {
+      "name": "uml-use-case-diagram",
+      "diagram": {
+        "version": 2,
+        "metadata": {
+          "title": "Online shopping — use case diagram",
+          "view": "freeform"
+        },
+        "elements": [
+          {
+            "id": 0,
+            "kind": "stick_figure",
+            "label": "Customer",
+            "x": 0.0,
+            "y": 9.0,
+            "w": 10.0,
+            "h": 6.0,
+            "ink": "braille"
+          },
+          {
+            "id": 1,
+            "kind": "stick_figure",
+            "label": "Payment Gateway",
+            "x": 0.0,
+            "y": 18.0,
+            "w": 10.0,
+            "h": 6.0,
+            "ink": "braille"
+          },
+          {
+            "id": 2,
+            "kind": "ellipse",
+            "label": "Browse Catalog",
+            "x": 18.0,
+            "y": 0.0,
+            "w": 18.0,
+            "h": 6.0
+          },
+          {
+            "id": 3,
+            "kind": "ellipse",
+            "label": "Place Order",
+            "x": 18.0,
+            "y": 9.0,
+            "w": 18.0,
+            "h": 6.0
+          },
+          {
+            "id": 4,
+            "kind": "ellipse",
+            "label": "Track Shipment",
+            "x": 18.0,
+            "y": 18.0,
+            "w": 18.0,
+            "h": 6.0
+          },
+          {
+            "id": 5,
+            "kind": "ellipse",
+            "label": "Process Payment",
+            "x": 44.0,
+            "y": 9.0,
+            "w": 18.0,
+            "h": 6.0
+          }
+        ],
+        "relations": [
+          {
+            "id": 0,
+            "kind": "association",
+            "from": 0,
+            "to": 2
+          },
+          {
+            "id": 1,
+            "kind": "association",
+            "from": 0,
+            "to": 3
+          },
+          {
+            "id": 2,
+            "kind": "association",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "id": 3,
+            "kind": "association",
+            "from": 3,
+            "to": 5,
+            "label": "«include»"
+          },
+          {
+            "id": 4,
+            "kind": "association",
+            "from": 1,
+            "to": 5
+          }
+        ],
+        "next_element_id": 6,
+        "next_relation_id": 5
+      }
+    }
+  ]
+}
