@@ -64,6 +64,7 @@ pub fn cells(doc: &Document, grid: bool, labels: bool, border: f64) -> Buffer {
         refused: &refused,
         reshape: None,
         hover: None,
+        hover_arrow: None,
         marquee: None,
         labels,
         grid,
@@ -316,8 +317,8 @@ mod tests {
     #[test]
     fn the_cells_frame_the_whole_diagram_with_a_margin_and_no_chrome() {
         let buf = cells(&doc(), false, true, 2.0);
-        // 10..52 wide, 6..12 tall, plus two cells of margin either side.
-        assert_eq!((buf.area.width, buf.area.height), (46, 10));
+        // 10..60 wide, 6..12 tall, plus two cells of margin either side.
+        assert_eq!((buf.area.width, buf.area.height), (54, 10));
         let text: String = (0..buf.area.height)
             .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
             .map(|(x, y)| buf[(x, y)].symbol().to_string())

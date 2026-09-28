@@ -536,6 +536,9 @@ fn element_fields(e: &Element) -> Vec<Field> {
         f(Text, "padding", Unit::Cells, e.text.padding.to_string()),
         f(Text, "align", Unit::Align, e.text.align.name().to_string()),
         f(Text, "valign", Unit::VAlign, e.text.valign.name().to_string()),
+        // Never set by this app on its own — an import's own free text (Archi's own
+        // "Documentation" field, say), kept and editable rather than shown nowhere at all.
+        f(Text, "documentation", Unit::Text, e.documentation.clone().unwrap_or_default()),
         f(Arrange, "kind", Unit::ShapeKind, e.kind.slug().to_string()),
         f(Arrange, "x", Unit::Cells, format!("{}", e.x.round() as i64)),
         f(Arrange, "y", Unit::Cells, format!("{}", e.y.round() as i64)),
@@ -575,9 +578,10 @@ fn relation_fields(r: &Relation) -> Vec<Field> {
         f(Text, "text colour", Unit::Colour, r.text.color.map(Colour::name).unwrap_or_default()),
         f(Text, "label band", Unit::YesNo, yes_no(r.text.band)),
         f(Text, "label at", Unit::Percent, r.label_at.map_or("50".into(), |p| p.to_string())),
+        f(Text, "documentation", Unit::Text, r.documentation.clone().unwrap_or_default()),
         f(Arrange, "from port", Unit::Port, port_name(r.from_port)),
         f(Arrange, "to port", Unit::Port, port_name(r.to_port)),
-        f(Arrange, "elbow", Unit::Cells, r.elbow.map(|e| e.to_string()).unwrap_or_default()),
+        f(Arrange, "elbow", Unit::Percent, r.elbow.map_or("50".into(), |e| e.to_string())),
         f(Arrange, "reverse", Unit::Action, "swap the two ends".into()),
     ]
 }
@@ -655,6 +659,7 @@ pub fn apply(doc: &mut Document, target: Target, name: &str, value: &str) -> Res
                 "label" => e.label = value.to_string(),
                 "api name" => e.api_name = if value.is_empty() { None } else { Some(value.to_string()) },
                 "plural" => e.plural = if value.is_empty() { None } else { Some(value.to_string()) },
+                "documentation" => e.documentation = if value.is_empty() { None } else { Some(value.to_string()) },
                 "status" => e.status = Status::parse(value).ok_or_else(|| format!("status is active, experimental or deprecated, not {value:?}"))?,
                 "visibility" => e.visibility = Visibility::parse(value).ok_or_else(|| format!("visibility is prominent, normal or hidden, not {value:?}"))?,
                 "properties" | "parameters" => return Err("the rows have a browser of their own — P on the shape, or :props".into()),
@@ -769,7 +774,15 @@ pub fn apply(doc: &mut Document, target: Target, name: &str, value: &str) -> Res
                     look.opacity = n;
                 }
                 "elbow" => {
-                    r.elbow = if value.is_empty() { None } else { Some(value.parse().map_err(|_| format!("elbow is cells from the tail along the first leg, not {value:?} — blank for half way"))?) };
+                    if value.is_empty() {
+                        r.elbow = None;
+                        return Ok(());
+                    }
+                    let n: i64 = value.trim_end_matches('%').trim().parse().map_err(|_| format!("elbow is per cent along the first leg, not {value:?} — blank for half way"))?;
+                    if !(0..=100).contains(&n) {
+                        return Err("elbow runs from 0 to 100 %".into());
+                    }
+                    r.elbow = if n == 50 { None } else { Some(n) };
                     return Ok(());
                 }
                 "tail" => look.tail = End::parse(value).ok_or_else(|| format!("no end called {value:?} — none, arrow, open-arrow, triangle, diamond, hollow-diamond, dot, crow, bar, circle"))?,
@@ -842,6 +855,10 @@ pub fn apply(doc: &mut Document, target: Target, name: &str, value: &str) -> Res
                     r.label_at = if n == 50 { None } else { Some(n) };
                     return Ok(());
                 }
+                "documentation" => {
+                    r.documentation = if value.is_empty() { None } else { Some(value.to_string()) };
+                    return Ok(());
+                }
                 other => return Err(format!("no field {other:?}")),
             }
             // The relation's own look is a full notation, so a kind change resetting it is
@@ -864,7 +881,7 @@ mod tests {
         let fs = fields(&doc, Target::Element(id)).unwrap();
         let by = |t: Tab| fs.iter().filter(|f| f.tab == t).map(|f| f.name).collect::<Vec<_>>();
         assert_eq!(by(Tab::Style), ["look", "fill", "outline", "colour", "line", "stroke", "opacity", "ink"]);
-        assert_eq!(by(Tab::Text), ["label", "font", "size", "bold", "italic", "underline", "text colour", "label band", "wrap", "label width", "padding", "align", "valign"]);
+        assert_eq!(by(Tab::Text), ["label", "font", "size", "bold", "italic", "underline", "text colour", "label band", "wrap", "label width", "padding", "align", "valign", "documentation"]);
         assert_eq!(by(Tab::Arrange), ["kind", "x", "y", "width", "height", "skew x", "skew y", "snap to grid", "to front", "to back", "bring forward", "send backward", "layer", "locked"]);
         assert_eq!(fs.iter().find(|f| f.name == "kind").unwrap().value, "node");
         assert_eq!(fs.iter().find(|f| f.name == "width").unwrap().unit, Unit::Cells);
@@ -914,8 +931,8 @@ mod tests {
         let fs = fields(&doc, Target::Relation(r, Node::Head)).unwrap();
         let names: Vec<&str> = fs.iter().map(|f| f.name).collect();
         assert_eq!(&names[..10], ["kind", "look", "route", "line", "width", "tail", "head", "end size", "colour", "opacity"]);
-        assert_eq!(&names[10..20], ["tail label", "label", "head label", "font", "size", "bold", "italic", "text colour", "label band", "label at"]);
-        assert_eq!(&names[20..24], ["from port", "to port", "elbow", "reverse"]);
+        assert_eq!(&names[10..21], ["tail label", "label", "head label", "font", "size", "bold", "italic", "text colour", "label band", "label at", "documentation"]);
+        assert_eq!(&names[21..25], ["from port", "to port", "elbow", "reverse"]);
         assert_eq!(node_field(Node::Head), "head label");
         assert!(apply(&mut doc, Target::Relation(r, Node::Centre), "head", "crow").is_ok());
         assert!(apply(&mut doc, Target::Relation(r, Node::Centre), "line", "dash").is_ok());
@@ -1063,7 +1080,7 @@ mod tests {
         assert_eq!(Unit::Percent.choices().unwrap().len(), 10);
         // An architecture shape's auto fill is its layer's pastel; a plain one's is paper.
         let app = doc.add(ShapeKind::ApplicationComponent, "b", 0.0, 10.0);
-        assert_eq!(doc.element(app).unwrap().fill_on(true), Some([181, 255, 255]));
+        assert_eq!(doc.element(app).unwrap().fill_on(true), Some([208, 222, 213]));
         assert_eq!(doc.element(id).unwrap().fill_on(true), Some([255, 255, 255]));
     }
 
@@ -1156,17 +1173,20 @@ mod tests {
         apply(&mut doc, t, "end size", "large").unwrap();
         apply(&mut doc, t, "opacity", "40").unwrap();
         apply(&mut doc, t, "look", "blue").unwrap();
-        apply(&mut doc, t, "elbow", "6").unwrap();
-        let rel = doc.relation(r).unwrap();
+        apply(&mut doc, t, "elbow", "30").unwrap();
+        let rel = doc.relation(r).unwrap().clone();
         let n = rel.notation();
         assert_eq!((n.route, n.end_size, n.opacity, n.color), (Route::Orthogonal, EndSize::Large, 40, Some(Colour::Hex([108, 142, 191]))));
-        assert_eq!(rel.elbow, Some(6));
+        assert_eq!(rel.elbow, Some(30));
         let value = |doc: &Document, n: &str| fields(doc, t).unwrap().into_iter().find(|f| f.name == n).unwrap().value;
-        assert_eq!((value(&doc, "look"), value(&doc, "route"), value(&doc, "elbow")), ("blue".into(), "orthogonal".into(), "6".into()));
-        let pts = doc.route(rel).unwrap();
+        assert_eq!((value(&doc, "look"), value(&doc, "route"), value(&doc, "elbow")), ("blue".into(), "orthogonal".into(), "30".into()));
+        let pts = doc.route(&rel).unwrap();
         assert_eq!(pts.len(), 4, "an orthogonal route has two turns");
-        let leg = (pts[1].0 - pts[0].0).abs() + (pts[1].1 - pts[0].1).abs();
-        assert!((leg - 6.0).abs() < 1e-9, "the first leg is the elbow long: {pts:?}");
+        let (p1, p2) = doc.end_points(&rel).unwrap();
+        let across = doc.bendable(&rel).unwrap();
+        let span = if across { p2.0 - p1.0 } else { p2.1 - p1.1 };
+        let want = if across { (p1.0 + span * 0.30, p1.1) } else { (p1.0, p1.1 + span * 0.30) };
+        assert!((pts[1].0 - want.0).abs() < 1e-9 && (pts[1].1 - want.1).abs() < 1e-9, "the first leg turns 30% of the way along: {pts:?}");
         assert!(pts[1].0 == pts[0].0 || pts[1].1 == pts[0].1, "and square to its edge");
         apply(&mut doc, t, "elbow", "").unwrap();
         assert_eq!(doc.relation(r).unwrap().elbow, None, "blank is half way");

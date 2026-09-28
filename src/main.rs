@@ -42,6 +42,10 @@ vim-shapes — architecture diagrams, driven like vim
   vim-shapes --ontology         the whole ontology, as JSON, and exit
   vim-shapes --render <file> <out.png> [--tab N] [--px 20] [--font <path>]
                                 render one tab to a PNG, through a monospace font, and exit
+  vim-shapes --import-coarchi <src> <dst>
+                                a coArchi model repository, written out as a workbench
+                                folder of this app's own files — one per view, folders
+                                mirroring the model's own — and exit
 ";
 
 fn main() -> io::Result<()> {
@@ -106,6 +110,39 @@ fn main() -> io::Result<()> {
                 }
                 Err(e) => {
                     eprintln!("{path}: {e}");
+                    std::process::exit(1);
+                }
+            };
+        }
+        Some("--import-coarchi") => {
+            let (Some(src), Some(dst)) = (args.get(1), args.get(2)) else {
+                eprintln!("usage: vim-shapes --import-coarchi <src> <dst>");
+                std::process::exit(2);
+            };
+            let src = std::path::Path::new(src);
+            let dst = std::path::Path::new(dst);
+            // Progress on stderr, `\r`-updated in place, throttled to every 20 files — a big
+            // coArchi repository is thousands of small ones, and printing nothing at all
+            // until it is entirely done looks exactly like a hang, which is what this is for.
+            let progress = |label: &str, n: usize| {
+                if n.is_multiple_of(20) {
+                    eprint!("\r{label}: {n} files so far...");
+                    let _ = io::Write::flush(&mut io::stderr());
+                }
+            };
+            let mut read_progress = |n: usize| progress("reading", n);
+            let result = archimate_import::import_coarchi_reporting(src, &mut read_progress).and_then(|(ws, tree)| {
+                let mut write_progress = |n: usize| progress("writing", n);
+                archimate_import::write_workbench(dst, &ws, &tree, &mut write_progress)
+            });
+            eprint!("\r\x1b[2K");
+            return match result {
+                Ok(n) => {
+                    println!("{}: {n} diagram{} written to {}", src.display(), if n == 1 { "" } else { "s" }, dst.display());
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("{}: {e}", src.display());
                     std::process::exit(1);
                 }
             };

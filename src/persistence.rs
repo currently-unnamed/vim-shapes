@@ -36,13 +36,19 @@ pub fn save(ws: &Workspace, path: &Path) -> std::io::Result<()> {
 pub fn load(path: &Path) -> Result<Workspace, LoadError> {
     let text = std::fs::read_to_string(path).map_err(LoadError::Io)?;
     let value: serde_json::Value = serde_json::from_str(&text).map_err(LoadError::Parse)?;
-    let ws: Workspace = if value.get("tabs").is_some() {
+    let mut ws: Workspace = if value.get("tabs").is_some() {
         serde_json::from_value(value).map_err(LoadError::Parse)?
     } else {
         let doc: Document = serde_json::from_value(value).map_err(LoadError::Parse)?;
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "diagram 1".into());
         Workspace::single(name, doc)
     };
+    // An older file's own numbers, read against the geometry it still describes, before
+    // anything checks out against the current format — each tab is its own document, and
+    // migrates on its own.
+    for t in &mut ws.tabs {
+        t.diagram.migrate_legacy_elbows();
+    }
     validate_workspace(&ws).map_err(LoadError::Invalid)?;
     Ok(ws)
 }
@@ -123,6 +129,31 @@ mod tests {
         assert_eq!(ws.tabs[0].diagram.elements[0].label, "db");
         assert!(ws.tabs[0].name.starts_with("vim-shapes-v2"), "named after the file: {}", ws.tabs[0].name);
         assert!(ws.grid);
+    }
+
+    #[test]
+    fn a_version_2_file_s_elbow_converts_from_cells_to_the_same_per_cent_point_and_is_marked_current() {
+        let path = tmp("elbow-v2");
+        std::fs::write(
+            &path,
+            r#"{ "version": 2,
+                 "elements": [
+                   { "id": 0, "kind": "node", "x": 0, "y": 0, "w": 10, "h": 4 },
+                   { "id": 1, "kind": "node", "x": 30, "y": 0, "w": 10, "h": 4 }
+                 ],
+                 "relations": [ { "id": 0, "kind": "link", "from": 0, "to": 1, "elbow": 3 } ] }"#,
+        )
+        .unwrap();
+        let ws = load(&path).expect("load");
+        std::fs::remove_file(&path).ok();
+        let doc = &ws.tabs[0].diagram;
+        assert_eq!(doc.version, crate::model::CURRENT_VERSION, "migrated once, so a re-save never runs this again");
+        let rel = &doc.relations[0];
+        assert_eq!(rel.elbow, Some(15), "3 cells of a 20-cell leg is 15% of it");
+        // The route itself still lands exactly where the old, cell-based file always drew it —
+        // only what the number in the file means has changed, never the picture.
+        let pts = doc.route(rel).unwrap();
+        assert_eq!(pts[1], (13.0, 2.0), "still 3 cells from the tail, kept now as 15% of it");
     }
 
     #[test]

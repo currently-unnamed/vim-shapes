@@ -668,13 +668,19 @@ pub(super) fn paint_handles(scene: &Scene, area: Rect, buf: &mut Buffer) {
             g.fixed(p.0, p.1, ch, c);
         }
         // A plain hover, not a reshape in hand: an arrow just outside each handle too,
-        // faint — click one to add a new connected shape that way, the mouse's own `o`.
+        // faint — click one to add a new connected shape that way, the mouse's own `o`. The
+        // one the mouse is actually over right now stays full-strength, so a diagonal
+        // approach can tell which of the eight it is about to click before it does. The
+        // corners are solid quadrant blocks, not thin arrows — a diagonal target is easy to
+        // undershoot on a grid this coarse, and a filled wedge reads as "aim here" the way a
+        // one-cell-wide arrowhead does not.
         if on.is_none() {
-            const GLYPH: [char; 8] = ['↖', '▲', '↗', '▶', '↘', '▼', '↙', '◀'];
-            let faint = theme::fade(theme::t().aqua, 45, theme::t().ground);
+            const GLYPH: [char; 8] = ['◤', '▲', '◥', '▶', '◢', '▼', '◣', '◀'];
+            let faint = theme::fade(theme::t().aqua, 65, theme::t().ground);
             for (i, a) in e.arrows(super::ARROW_GAP).into_iter().enumerate() {
                 let p = cell(a);
-                g.fixed(p.0, p.1, GLYPH[i], faint);
+                let c = if scene.hover_arrow == Some(i) { theme::t().aqua } else { faint };
+                g.fixed(p.0, p.1, GLYPH[i], c);
             }
         }
     }

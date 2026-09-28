@@ -47,8 +47,16 @@ pub struct Scene<'a> {
     /// The element under the mouse, outside any reshape — a fallback so its handles paint
     /// too, and can be found before anything is clicked.
     pub hover: Option<ElementId>,
+    /// Which of `hover`'s eight arrow regions the mouse sits in right now, if any — so
+    /// `paint_handles` can pick that one out from the other seven faint arrows instead of
+    /// leaving all eight looking equally clickable.
+    pub hover_arrow: Option<usize>,
     /// A marquee drag in progress: its anchor, and where the mouse is now.
     pub marquee: Option<((f64, f64), (f64, f64))>,
+    /// Where the mouse sits in world space right now, over an element or not — the relation
+    /// in hand reaches for this when the drag is over open ground, so it appears the instant
+    /// the drag leaves `holding`'s element rather than waiting for it to land on another one.
+    pub mouse: Option<(f64, f64)>,
     /// Whether shape labels are written. The PNG renderer leaves them out and sets them in
     /// each shape's own font instead; the screen always writes them.
     pub labels: bool,
@@ -62,6 +70,11 @@ pub struct Scene<'a> {
 /// How far a sketched outline wanders on screen, in cells: under half a cell, so a shape
 /// still reads as the box it is, and the wobble shows in the braille.
 const SKETCH: f64 = 0.35;
+
+/// How much of a hovered shape's outline is `bright` rather than its own colour: enough to
+/// read as "this one" next to its neighbours, not so much it competes with the cursor's own
+/// yellow or a picked shape's green.
+const HOVER_TINT: u8 = 35;
 
 /// How wide a relation's own label wraps to when nothing has set `text.width` — an element's
 /// blank width is its own inside, but a relation has no box to fall back on, so this is the
@@ -243,6 +256,10 @@ impl Scene<'_> {
         } else {
             let e = self.doc.element(id);
             let own = e.and_then(|e| e.color).map(theme::colour).unwrap_or_else(|| theme::layer_color(layer));
+            // A plain mouse hover, on top of whatever the shape's own colour already is — the
+            // same tint regardless of layer or fill, so it reads as "the mouse is here" and
+            // not as a colour the ontology assigned meaning to.
+            let own = if self.hover == Some(id) { theme::fade(theme::t().bright, HOVER_TINT, own) } else { own };
             theme::fade(own, e.map_or(100, |e| e.drawn_opacity()), self.ground())
         }
     }
@@ -262,15 +279,21 @@ impl Scene<'_> {
             let Some(pts) = self.doc.route(r) else { continue };
             paint_relation(ctx, &pts, &n, colour, flip);
         }
-        // The relation in hand: from the held element to wherever the cursor is.
-        if let (Some(from), Some(to)) = (self.holding, self.cursor)
-            && from != to
-            && let (Some(a), Some(b)) = (self.doc.element(from), self.doc.element(to))
+        // The relation in hand: from the held element to whatever the cursor is over, or —
+        // over open ground, where there's no element to aim at — the raw mouse point, so the
+        // line follows the drag out from the start instead of waiting for it to land on
+        // something.
+        if let Some(from) = self.holding
+            && let Some(a) = self.doc.element(from)
         {
-            let p1 = shapes::edge_point(a.x, a.y, a.w, a.h, b.center());
-            let p2 = shapes::edge_point(b.x, b.y, b.w, b.h, a.center());
-            let hand = crate::ontology::Notation { line: LineStyle::Dashed, tail: End::None, head: End::Arrow, width: 1, color: None, route: crate::ontology::Route::Straight, end_size: crate::ontology::EndSize::Normal, opacity: 100 };
-            paint_relation(ctx, &[p1, p2], &hand, theme::t().yellow, flip);
+            let to_elem = self.cursor.filter(|&to| to != from).and_then(|to| self.doc.element(to));
+            let far = to_elem.map(|b| b.center()).or(self.mouse);
+            if let Some(far) = far {
+                let p1 = shapes::edge_point(a.x, a.y, a.w, a.h, far);
+                let p2 = to_elem.map(|b| shapes::edge_point(b.x, b.y, b.w, b.h, a.center())).unwrap_or(far);
+                let hand = crate::ontology::Notation { line: LineStyle::Dashed, tail: End::None, head: End::Arrow, width: 1, color: None, route: crate::ontology::Route::Straight, end_size: crate::ontology::EndSize::Normal, opacity: 100 };
+                paint_relation(ctx, &[p1, p2], &hand, theme::t().yellow, flip);
+            }
         }
         // A marquee in progress: a dashed box from its anchor to wherever the mouse is now.
         if let Some(((ax, ay), (bx, by))) = self.marquee {
@@ -372,6 +395,11 @@ impl Scene<'_> {
                 Fill::Auto if e.kind.layer() != Layer::Sketch => e.kind.layer().pastel(),
                 _ => None,
             };
+            // Whether a tint is actually painted under this shape — `dim`'s own contrast was
+            // only ever checked against the plain ground, and in dark mode a layer's tint
+            // sits close enough in tone to wash it right out; the tag needs `ink` instead
+            // wherever that tint is the ground it is actually read against.
+            let mut tinted = false;
             if let Some(rgb) = rgb
                 && !composite
                 && !matches!(shape, crate::ontology::Shape::Text | crate::ontology::Shape::Dashed | crate::ontology::Shape::StickFigure)
@@ -380,6 +408,7 @@ impl Scene<'_> {
                 let t = crate::ontology::mix(rgb, [gr, gg, gb], 1.0 - 0.35 * e.drawn_opacity() as f64 / 100.0);
                 let tint = Color::Rgb(t[0], t[1], t[2]);
                 tint_inside(e, outline.as_deref(), col, row, buf, tint);
+                tinted = true;
             }
             // The cursor's shape is INVERSE: its inside tinted, its label black on yellow. An
             // outline in a different colour was too subtle to find on a busy diagram.
@@ -399,6 +428,8 @@ impl Scene<'_> {
             let label_style = dress(label_style, &e.text, plain, self.ground());
             let tag_style = if on && self.focus_rel.is_none() {
                 Style::new().fg(theme::t().ink).bg(theme::t().hilite).bold()
+            } else if tinted {
+                Style::new().fg(theme::t().ink)
             } else {
                 Style::new().fg(theme::t().dim)
             };
@@ -691,7 +722,7 @@ mod page_tests {
         let mut term = Terminal::new(TestBackend::new(60, 16)).unwrap();
         term.draw(|f| {
             f.render_widget(
-                Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, marquee: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
+                Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, hover_arrow: None, marquee: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
                 f.area(),
             )
         })
@@ -747,7 +778,7 @@ mod page_tests {
             let mut term = Terminal::new(TestBackend::new(60, 16)).unwrap();
             term.draw(|f| {
                 f.render_widget(
-                    Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, marquee: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
+                    Scene { doc, cursor: None, focus_rel: None, focus_node: Node::Centre, holding: None, picked: &[], camera: (0.0, 0.0), letters: None, insert: None, refused: &[], reshape: None, hover: None, hover_arrow: None, marquee: None, labels: false, grid: true, ink: crate::ui::wire::Ink::Braille },
                     f.area(),
                 )
             })
@@ -833,7 +864,7 @@ mod tests {
                 letters: None,
                 insert: None,
                 refused: &[],
-                reshape: None, hover: None, marquee: None,
+                reshape: None, hover: None, hover_arrow: None, marquee: None,
                 labels: true,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -866,7 +897,7 @@ mod tests {
                 letters: None,
                 insert: None,
                 refused: &[],
-                reshape: None, hover: None, marquee: None,
+                reshape: None, hover: None, hover_arrow: None, marquee: None,
                 labels: true,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -901,7 +932,7 @@ mod tests {
             letters: None,
             insert: None,
             refused: &[],
-            reshape: None, hover: None, marquee: None,
+            reshape: None, hover: None, hover_arrow: None, marquee: None,
             labels: true,
             grid: true,
             ink: crate::ui::wire::Ink::Braille,
@@ -942,6 +973,7 @@ mod tests {
                 refused: &[],
                 reshape: None,
                 hover: Some(a),
+                hover_arrow: None,
                 marquee: None,
                 labels: false,
                 grid: false,
@@ -952,6 +984,36 @@ mod tests {
         );
         assert!(out.contains('◇'), "an unpatched hover handle is a fixed line-art glyph, not a braille mark, whatever the document's own ink: {out}");
         assert!(out.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)), "the shape's own outline is still braille — only the control changed: {out}");
+    }
+
+    #[test]
+    fn hovering_a_shape_tints_its_own_outline_and_leaves_its_neighbour_alone() {
+        let mut doc = Document::default();
+        let a = doc.add(ShapeKind::Box, "a", 10.0, 6.0);
+        let b = doc.add(ShapeKind::Box, "b", 40.0, 6.0);
+        let layer = doc.element(a).unwrap().kind.layer();
+        let scene = |hover| Scene {
+            doc: &doc,
+            cursor: None,
+            focus_rel: None,
+            focus_node: Node::Centre,
+            holding: None,
+            picked: &[],
+            camera: (0.0, 0.0),
+            letters: None,
+            insert: None,
+            refused: &[],
+            reshape: None,
+            hover,
+            hover_arrow: None,
+            marquee: None,
+            labels: false,
+            grid: false,
+            ink: crate::ui::wire::Ink::Braille,
+        };
+        let base = scene(None).colour_of(a, layer);
+        assert_ne!(scene(Some(a)).colour_of(a, layer), base, "hovering a shape changes its own outline colour");
+        assert_eq!(scene(Some(a)).colour_of(b, layer), base, "a shape someone else is hovering stays its own colour");
     }
 
     #[test]
@@ -973,6 +1035,7 @@ mod tests {
             refused: &[],
             reshape: None,
             hover: None,
+            hover_arrow: None,
             marquee: None,
             labels: false,
             grid: false,
@@ -986,7 +1049,59 @@ mod tests {
         assert!(tinted, "an architecture-layer shape's own auto fill is the layer's pastel on screen, not just in the exports");
         let plain_e = doc.element(plain).unwrap();
         let untinted = (plain_e.x as u16 + 2..plain_e.right() as u16).all(|x| buf[(x, plain_e.y as u16 + 2)].bg == Color::Reset);
-        assert!(untinted, "a plain sketch shape's auto fill is still nothing on screen — the blank whiteboard box it always was");
+        assert!(untinted, "a plain sketch shape's own auto fill is still nothing on screen — the blank whiteboard box it always was");
+    }
+
+    #[test]
+    fn every_layer_s_auto_fill_still_lets_the_kind_tag_read_over_it() {
+        use ratatui::{backend::TestBackend, Terminal};
+        for layer in Layer::ALL {
+            if layer == Layer::Composite || layer == Layer::Sketch {
+                continue; // Composite has no pastel; a sketch shape's auto fill stays untinted.
+            }
+            let kind = ShapeKind::ALL.into_iter().find(|k| k.layer() == layer).unwrap_or_else(|| panic!("{layer:?} has no kind to test with"));
+            let mut doc = Document::default();
+            let id = doc.add(kind, "x", 0.0, 0.0);
+            {
+                let e = doc.element_mut(id).unwrap();
+                e.w = 24.0;
+                e.h = 6.0;
+            }
+            let scene = Scene {
+                doc: &doc,
+                cursor: None,
+                focus_rel: None,
+                focus_node: Node::Centre,
+                holding: None,
+                picked: &[],
+                camera: (0.0, 0.0),
+                letters: None,
+                insert: None,
+                refused: &[],
+                reshape: None,
+                hover: None,
+                hover_arrow: None,
+                marquee: None,
+                labels: false,
+                grid: false,
+                ink: crate::ui::wire::Ink::Braille,
+            };
+            let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+            term.draw(|f| f.render_widget(scene, f.area())).unwrap();
+            let buf = term.backend().buffer();
+            let e = doc.element(id).unwrap();
+            // The exact cell `put` writes the tag's first character to, in `text()` — an
+            // outline stroke can sit on the same row, so only this column is guaranteed to
+            // be the tag itself and not a braille dot with no tint under it.
+            let tag = e.tag();
+            let tw = tag.chars().count() as f64;
+            let (x, y) = ((e.x + (e.w - tw) / 2.0).round() as u16, (e.y + 1.0) as u16);
+            let cell = &buf[(x, y)];
+            assert_eq!(cell.symbol(), &tag[..1], "{layer:?}: not the tag's own cell");
+            assert_ne!(cell.bg, Color::Reset, "{layer:?}'s shape is tinted, or this isn't testing what it thinks");
+            let c = theme::contrast(cell.fg, cell.bg);
+            assert!(c >= 3.0, "{layer:?}'s kind tag on its own full-strength tint: {c:.2}");
+        }
     }
 
     #[test]
@@ -1013,6 +1128,7 @@ mod tests {
             refused: &[],
             reshape: None,
             hover: None,
+            hover_arrow: None,
             marquee: None,
             labels: false,
             grid: false,
@@ -1048,7 +1164,7 @@ mod tests {
                 letters: None,
                 insert: None,
                 refused: &[],
-                reshape: None, hover: None, marquee: None,
+                reshape: None, hover: None, hover_arrow: None, marquee: None,
                 labels: true,
                 grid: false,
                 ink: crate::ui::wire::Ink::Braille,
@@ -1108,7 +1224,7 @@ mod tests {
             letters: None,
             insert,
             refused: &[],
-            reshape: None, hover: None, marquee: None,
+            reshape: None, hover: None, hover_arrow: None, marquee: None,
             labels: true,
             grid: true,
             ink: crate::ui::wire::Ink::Braille,

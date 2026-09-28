@@ -32,7 +32,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -40,8 +40,9 @@ use quick_xml::Reader;
 use crate::drawio_export::{CELL_H, CELL_W};
 use crate::drawio_import::unescape;
 use crate::layout;
-use crate::model::{Document, ElementId, Tab, Workspace, WORKSPACE_VERSION};
-use crate::ontology::{RelationKind, ShapeKind};
+use crate::persistence;
+use crate::model::{Document, ElementId, Fill, Tab, Tag, Workspace, WORKSPACE_VERSION};
+use crate::ontology::{Colour, RelationKind, ShapeKind};
 
 #[derive(Debug)]
 pub enum ImportError {
@@ -70,6 +71,8 @@ struct RawElement {
     id: String,
     kind: String,
     name: String,
+    documentation: Option<String>,
+    tags: Vec<Tag>,
 }
 
 struct RawRelationship {
@@ -78,20 +81,40 @@ struct RawRelationship {
     name: Option<String>,
     source: String,
     target: String,
+    documentation: Option<String>,
+    tags: Vec<Tag>,
 }
 
 struct RawNode {
+    /// The `<node>`/`<children>` tag's own id within its view — never a model id. Only needed
+    /// to resolve a connection that names its ends this way instead of by `relationshipRef`;
+    /// see `RawConnection`.
+    identifier: String,
     element_ref: String,
     x: f64,
     y: f64,
     w: f64,
     h: f64,
+    /// A diagram object's own fill/outline colour, when the source set one — `None` leaves
+    /// this app's own ontology-driven look alone, the same as an element this app drew itself.
+    fill: Option<Colour>,
+    line: Option<Colour>,
+}
+
+/// A line drawn on a view. Most name a real model relationship (`relationship_ref`), resolved
+/// through the model the same as any other; one drawn with no relationship behind it — Archi
+/// allows a purely visual line — has none, and is placed by the two `<node>`/`<children>` ids
+/// it was drawn between instead, the only thing it has to go on.
+struct RawConnection {
+    relationship_ref: Option<String>,
+    source: String,
+    target: String,
 }
 
 struct RawView {
     name: String,
     nodes: Vec<RawNode>,
-    connections: Vec<String>,
+    connections: Vec<RawConnection>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -113,6 +136,7 @@ pub fn from_xml(xml: &str, fallback_name: &str) -> Result<Workspace, ImportError
 
     let mut section = Section::None;
     let mut in_name = false;
+    let mut in_documentation = false;
     let mut current_view: Option<RawView> = None;
 
     loop {
@@ -137,11 +161,12 @@ pub fn from_xml(xml: &str, fallback_name: &str) -> Result<Workspace, ImportError
                     }
                 }
                 "connection" => {
-                    if let (Some(v), Some(r)) = (current_view.as_mut(), read_connection_ref(&e)) {
-                        v.connections.push(r);
+                    if let Some(v) = current_view.as_mut() {
+                        v.connections.push(read_connection(&e));
                     }
                 }
                 "name" => in_name = true,
+                "documentation" => in_documentation = true,
                 _ => {}
             },
             Event::Empty(e) => match e.name().local_name().as_ref() {
@@ -153,8 +178,8 @@ pub fn from_xml(xml: &str, fallback_name: &str) -> Result<Workspace, ImportError
                     }
                 }
                 "connection" => {
-                    if let (Some(v), Some(r)) = (current_view.as_mut(), read_connection_ref(&e)) {
-                        v.connections.push(r);
+                    if let Some(v) = current_view.as_mut() {
+                        v.connections.push(read_connection(&e));
                     }
                 }
                 _ => {}
@@ -168,6 +193,7 @@ pub fn from_xml(xml: &str, fallback_name: &str) -> Result<Workspace, ImportError
                     section = Section::None;
                 }
                 "name" => in_name = false,
+                "documentation" => in_documentation = false,
                 _ => {}
             },
             Event::Text(t) if in_name => {
@@ -195,6 +221,22 @@ pub fn from_xml(xml: &str, fallback_name: &str) -> Result<Workspace, ImportError
                     }
                 }
             }
+            Event::Text(t) if in_documentation => {
+                let text = unescape(t.as_ref());
+                match section {
+                    Section::Element => {
+                        if let Some(last) = elements.last_mut().filter(|e| e.documentation.is_none()) {
+                            last.documentation = Some(text);
+                        }
+                    }
+                    Section::Relationship => {
+                        if let Some(last) = relationships.last_mut().filter(|r| r.documentation.is_none()) {
+                            last.documentation = Some(text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -219,11 +261,19 @@ fn read_element(e: &BytesStart) -> Result<RawElement, ImportError> {
             _ => {}
         }
     }
-    Ok(RawElement { id, kind, name: String::new() })
+    Ok(RawElement { id, kind, name: String::new(), documentation: None, tags: Vec::new() })
 }
 
 fn read_relationship(e: &BytesStart) -> Result<RawRelationship, ImportError> {
-    let mut r = RawRelationship { id: String::new(), kind: String::new(), name: None, source: String::new(), target: String::new() };
+    let mut r = RawRelationship {
+        id: String::new(),
+        kind: String::new(),
+        name: None,
+        source: String::new(),
+        target: String::new(),
+        documentation: None,
+        tags: Vec::new(),
+    };
     for a in e.attributes() {
         let a = a.map_err(|e| ImportError::Invalid(format!("bad attribute: {e}")))?;
         let v = a.value.into_owned();
@@ -242,12 +292,14 @@ fn read_relationship(e: &BytesStart) -> Result<RawRelationship, ImportError> {
 /// label, neither of which names a model element. Its children (if it is a container) are
 /// still walked, since a `Start` tag was seen either way.
 fn read_node(e: &BytesStart) -> Result<Option<RawNode>, ImportError> {
+    let mut identifier = String::new();
     let mut element_ref: Option<String> = None;
     let (mut x, mut y, mut w, mut h) = (0.0, 0.0, 0.0, 0.0);
     for a in e.attributes() {
         let a = a.map_err(|e| ImportError::Invalid(format!("bad attribute: {e}")))?;
         let v = a.value.into_owned();
         match a.key.local_name().as_ref() {
+            "identifier" => identifier = v,
             "elementRef" => element_ref = Some(v),
             "x" => x = v.parse().unwrap_or(0.0),
             "y" => y = v.parse().unwrap_or(0.0),
@@ -256,12 +308,24 @@ fn read_node(e: &BytesStart) -> Result<Option<RawNode>, ImportError> {
             _ => {}
         }
     }
-    Ok(element_ref.map(|element_ref| RawNode { element_ref, x, y, w, h }))
+    Ok(element_ref.map(|element_ref| RawNode { identifier, element_ref, x, y, w, h, fill: None, line: None }))
 }
 
-/// `None` for a connection with no `relationshipRef` — a plain visual line, not a relation.
-fn read_connection_ref(e: &BytesStart) -> Option<String> {
-    e.attributes().flatten().find(|a| a.key.local_name().as_ref() == "relationshipRef").map(|a| a.value.into_owned())
+/// `relationship_ref` is `None` for a connection with no `relationshipRef` — a plain visual
+/// line, not a relation; `build` still draws it, by `source`/`target` alone.
+fn read_connection(e: &BytesStart) -> RawConnection {
+    let mut relationship_ref = None;
+    let (mut source, mut target) = (String::new(), String::new());
+    for a in e.attributes().flatten() {
+        let v = a.value.into_owned();
+        match a.key.local_name().as_ref() {
+            "relationshipRef" => relationship_ref = Some(v),
+            "source" => source = v,
+            "target" => target = v,
+            _ => {}
+        }
+    }
+    RawConnection { relationship_ref, source, target }
 }
 
 fn build(model_name: &str, elements: Vec<RawElement>, relationships: Vec<RawRelationship>, views: Vec<RawView>) -> Workspace {
@@ -283,14 +347,28 @@ fn build(model_name: &str, elements: Vec<RawElement>, relationships: Vec<RawRela
     for (i, v) in views.iter().enumerate() {
         let mut doc = Document::default();
         let mut ids: HashMap<&str, ElementId> = HashMap::new();
+        // Keyed by the `<node>`/`<children>` tag's own id, not the model element's — only a
+        // visual-only connection (below) needs this; a real relationship is resolved by model
+        // id, through `ids`, the same as it always was.
+        let mut node_ids: HashMap<&str, ElementId> = HashMap::new();
         for n in &v.nodes {
             let Some(&ei) = by_id.get(n.element_ref.as_str()) else { continue };
-            ids.insert(elements[ei].id.as_str(), add_node(&mut doc, &elements[ei], n));
+            let eid = add_node(&mut doc, &elements[ei], n);
+            ids.insert(elements[ei].id.as_str(), eid);
+            node_ids.insert(n.identifier.as_str(), eid);
             placed.insert(ei);
         }
-        for cref in &v.connections {
-            let Some(&ri) = rel_by_id.get(cref.as_str()) else { continue };
-            connect(&mut doc, &ids, &relationships[ri]);
+        spread_apart(&mut doc);
+        for c in &v.connections {
+            if let Some(rref) = &c.relationship_ref {
+                let Some(&ri) = rel_by_id.get(rref.as_str()) else { continue };
+                connect(&mut doc, &ids, &relationships[ri]);
+            } else if let (Some(&from), Some(&to)) = (node_ids.get(c.source.as_str()), node_ids.get(c.target.as_str())) {
+                // No model relationship behind this line at all — Archi allows a purely visual
+                // one. The same fallback `relation_kind` gives an ArchiMate type this ontology
+                // has no name for: a plain link, never refused, meaning nothing to the rules.
+                let _ = doc.connect(RelationKind::Link, from, to);
+            }
         }
         tabs.push(Tab { name: view_tab_name(&v.name, i), diagram: doc });
     }
@@ -327,26 +405,124 @@ fn kind_and_label(e: &RawElement) -> (ShapeKind, String) {
 
 fn add_element(doc: &mut Document, e: &RawElement) -> ElementId {
     let (kind, label) = kind_and_label(e);
-    doc.add(kind, label, 0.0, 0.0)
+    let id = doc.add(kind, label, 0.0, 0.0);
+    apply_metadata(doc, id, e);
+    id
 }
 
 fn add_node(doc: &mut Document, e: &RawElement, n: &RawNode) -> ElementId {
     let (kind, label) = kind_and_label(e);
     let id = doc.add(kind, label, n.x / CELL_W, n.y / CELL_H);
+    apply_metadata(doc, id, e);
+    let el = doc.element_mut(id).expect("just added");
     if n.w > 0.0 && n.h > 0.0 {
-        let el = doc.element_mut(id).expect("just added");
-        el.w = n.w / CELL_W;
-        el.h = n.h / CELL_H;
+        // Never smaller than this kind's own default — Archi's own views are routinely drawn
+        // at a size that fits *its* font, not a monospace one at this app's own cell size,
+        // and a real element's name almost always outgrows what a small imported box has
+        // room for. Only ever grows a box the source drew small; one already drawn bigger
+        // keeps the room it had.
+        let (min_w, min_h) = kind.default_size();
+        el.w = (n.w / CELL_W).max(min_w);
+        el.h = (n.h / CELL_H).max(min_h);
+    }
+    if let Some(c) = n.fill {
+        el.fill = Fill::Colour(c);
+    }
+    if let Some(c) = n.line {
+        el.color = Some(c);
     }
     id
+}
+
+/// Documentation and tags carried through from the source — shared by `add_element` and
+/// `add_node` so an element gets the same treatment whether a view placed it or it only ever
+/// landed on the model's own "(unplaced)" tab, rather than keeping two copies of this in step.
+fn apply_metadata(doc: &mut Document, id: ElementId, e: &RawElement) {
+    if e.documentation.is_none() && e.tags.is_empty() {
+        return;
+    }
+    let el = doc.element_mut(id).expect("just added");
+    el.documentation = e.documentation.clone();
+    el.tags = e.tags.clone();
+}
+
+/// Undoes the one failure mode `add_node`'s own floor can cause: Archi routinely draws a plain
+/// box only as wide as *its* font needs, with just enough gap to the next box for that — often
+/// less than the growth this app's floor then applies to fit a real name at cell resolution. Grown
+/// in place, that eats the gap or overlaps the neighbour outright, while a box already drawn at
+/// or above the floor (a grouping with children, say) needed no growth and keeps the gap Archi
+/// drew. This restores that gap by nudging each overlapping pair apart, least-movement axis
+/// first, rather than by changing how much a box grows — the growth is still exactly what
+/// `add_node` decided; only the fallout from it is repaired.
+///
+/// Two boxes where one sits inside the other are left alone: that is containment (`Document::
+/// members` reads it from position), not an overlap to resolve.
+fn spread_apart(doc: &mut Document) {
+    let mut boxes: Vec<(ElementId, f64, f64, f64, f64)> =
+        doc.elements.iter().map(|e| (e.id, e.x, e.y, e.w, e.h)).collect();
+    let contains = |o: (f64, f64, f64, f64), i: (f64, f64, f64, f64)| {
+        o.0 <= i.0 && o.1 <= i.1 && o.0 + o.2 >= i.0 + i.2 && o.1 + o.3 >= i.1 + i.3
+    };
+    // Pushing one box away from one neighbour can open a new overlap with another, so a single
+    // sweep is not always enough — but any diagram this import produces settles well inside
+    // this many.
+    for _ in 0..8 {
+        let mut moved = false;
+        for i in 0..boxes.len() {
+            for j in (i + 1)..boxes.len() {
+                let (_, xi, yi, wi, hi) = boxes[i];
+                let (_, xj, yj, wj, hj) = boxes[j];
+                if contains((xi, yi, wi, hi), (xj, yj, wj, hj)) || contains((xj, yj, wj, hj), (xi, yi, wi, hi)) {
+                    continue;
+                }
+                let dx = (xj + wj / 2.0) - (xi + wi / 2.0);
+                let dy = (yj + hj / 2.0) - (yi + hi / 2.0);
+                // Raw penetration, gutter aside: two boxes only diagonally near each other (not
+                // truly overlapping on *either* axis) are left where Archi put them — only a
+                // real overlap, on both axes at once, is this pass's business.
+                let raw_ox = (wi + wj) / 2.0 - dx.abs();
+                let raw_oy = (hi + hj) / 2.0 - dy.abs();
+                if raw_ox <= 0.0 || raw_oy <= 0.0 {
+                    continue;
+                }
+                moved = true;
+                // Separate along whichever axis is shallower — for two boxes in the same row
+                // that is always x (their y-ranges coincide, so raw_oy is large), which is the
+                // shape of the bug this exists for: widen the row's gap, don't restack the row.
+                if raw_ox < raw_oy {
+                    let push = raw_ox / 2.0 + layout::GUT_X / 2.0 + 0.05;
+                    let sign = if dx >= 0.0 { 1.0 } else { -1.0 };
+                    boxes[j].1 += sign * push;
+                    boxes[i].1 -= sign * push;
+                } else {
+                    let push = raw_oy / 2.0 + layout::GUT_Y / 2.0 + 0.05;
+                    let sign = if dy >= 0.0 { 1.0 } else { -1.0 };
+                    boxes[j].2 += sign * push;
+                    boxes[i].2 -= sign * push;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    for (id, x, y, _, _) in boxes {
+        if let Some(e) = doc.element_mut(id) {
+            e.x = x;
+            e.y = y;
+        }
+    }
 }
 
 fn connect(doc: &mut Document, ids: &HashMap<&str, ElementId>, r: &RawRelationship) {
     let (Some(&from), Some(&to)) = (ids.get(r.source.as_str()), ids.get(r.target.as_str())) else { return };
     let Ok(rid) = doc.connect(relation_kind(&r.kind), from, to) else { return };
+    let rel = doc.relation_mut(rid).expect("just connected");
     if let Some(name) = r.name.as_deref().filter(|s| !s.is_empty()) {
-        doc.relation_mut(rid).expect("just connected").label = Some(name.to_string());
+        rel.label = Some(name.to_string());
     }
+    rel.documentation = r.documentation.clone();
+    rel.tags = r.tags.clone();
 }
 
 fn arrange(doc: &mut Document) {
@@ -361,8 +537,19 @@ fn arrange(doc: &mut Document) {
 /// The exact kind, when ArchiMate's own PascalCase type name, split at its capitals, names one
 /// of this ontology's own — see the module doc comment for why that is not a coincidence.
 /// `None` for a concept this ontology has no counterpart for.
+///
+/// Two exceptions, neither a real ArchiMate concept name so neither can collide with one:
+/// `Junction` merges or splits relationship lines in a view and has no concept of its own here,
+/// so it draws as the same plain circle a sketch uses for a node; `Note` and `ViewReference`
+/// are this importer's own markers (`walk_coarchi_node`) for two Archi-native, view-only
+/// objects with no backing model element — a sticky note and a link to another view — drawn as
+/// a label on its own rather than dropped.
 fn element_kind(xsi_type: &str) -> Option<ShapeKind> {
-    ShapeKind::parse(&kebab(xsi_type))
+    match xsi_type {
+        "Junction" => Some(ShapeKind::Circle),
+        "Note" | "ViewReference" => Some(ShapeKind::Text),
+        _ => ShapeKind::parse(&kebab(xsi_type)),
+    }
 }
 
 /// All eleven of ArchiMate's relationship names are already this ontology's own; anything else
@@ -493,6 +680,15 @@ pub enum ModelNode {
 /// it) or the `model` folder itself — whichever the user typed, so `:import` on the checkout
 /// works the same as `:import` on its `model` subfolder.
 pub fn import_coarchi(dir: &Path) -> Result<(Workspace, Vec<ModelNode>), ImportError> {
+    import_coarchi_reporting(dir, &mut |_| {})
+}
+
+/// `import_coarchi`, with `report` called after every element, relationship and view file is
+/// read — the running total, so a caller with nothing better to do than print it (the
+/// `--import-coarchi` CLI flag, which has no other way to show it is not stuck on a
+/// thousand-file model) can. `import_coarchi` itself is the same function with a `report`
+/// that does nothing, not a second copy of the walk to keep in step with this one.
+pub fn import_coarchi_reporting(dir: &Path, report: &mut dyn FnMut(usize)) -> Result<(Workspace, Vec<ModelNode>), ImportError> {
     let root = if dir.join("folder.xml").is_file() { dir.to_path_buf() } else { dir.join("model") };
     if !root.join("folder.xml").is_file() {
         return Err(ImportError::Invalid(format!("no folder.xml under {} — not a coArchi model", dir.display())));
@@ -503,7 +699,7 @@ pub fn import_coarchi(dir: &Path) -> Result<(Workspace, Vec<ModelNode>), ImportE
     let mut elements = Vec::new();
     let mut relationships = Vec::new();
     let mut views = Vec::new();
-    let tree = walk_coarchi_dir(&root, &mut elements, &mut relationships, &mut views)?;
+    let tree = walk_coarchi_dir(&root, &mut elements, &mut relationships, &mut views, report)?;
 
     if elements.is_empty() {
         return Err(ImportError::Invalid(format!("no elements found under {}", root.display())));
@@ -512,13 +708,88 @@ pub fn import_coarchi(dir: &Path) -> Result<(Workspace, Vec<ModelNode>), ImportE
     Ok((build(&name, elements, relationships, views), tree))
 }
 
+/// Writes an `import_coarchi` result out as a real workbench folder — the `--import-coarchi`
+/// CLI flag's own job, done here rather than in `main.rs` because only this module already
+/// understands the shape of both halves it has to walk in step: `tree`'s folders become real
+/// directories, each `ModelNode::View` becomes its own `{name}.json` workbench file holding
+/// just that view's tab, and any tab a view never claimed (everything, if the model had no
+/// views at all, or elements it drew nowhere) lands at `dst`'s own top level instead of
+/// silently dropped — `ws.tabs[i]` for every `i` `tree` never mentions.
+///
+/// A name collision (two views sharing a name in one folder) gets `-2`, `-3`, ... appended
+/// rather than one overwriting the other; two folders sharing a name merge, the same as
+/// `mkdir -p` already treats a directory that is there as no error at all. `report` is
+/// called with the running count after every file written — see `import_coarchi_reporting`'s
+/// doc for why. Returns how many `.json` files were written in total.
+pub fn write_workbench(dst: &Path, ws: &Workspace, tree: &[ModelNode], report: &mut dyn FnMut(usize)) -> Result<usize, ImportError> {
+    std::fs::create_dir_all(dst).map_err(ImportError::Io)?;
+    let mut claimed = HashSet::new();
+    let mut n = 0;
+    write_nodes(dst, ws, tree, &mut claimed, &mut n, report)?;
+    for (i, tab) in ws.tabs.iter().enumerate() {
+        if !claimed.contains(&i) {
+            let path = unique_path(dst, &crate::workbench::sanitize(&tab.name), ".json");
+            persistence::save(&Workspace::single(tab.name.clone(), tab.diagram.clone()), &path).map_err(ImportError::Io)?;
+            n += 1;
+            report(n);
+        }
+    }
+    Ok(n)
+}
+
+fn write_nodes(dir: &Path, ws: &Workspace, nodes: &[ModelNode], claimed: &mut HashSet<usize>, n: &mut usize, report: &mut dyn FnMut(usize)) -> Result<(), ImportError> {
+    for node in nodes {
+        match node {
+            ModelNode::Folder { name, children, .. } => {
+                let sub = dir.join(crate::workbench::sanitize(name));
+                std::fs::create_dir_all(&sub).map_err(ImportError::Io)?;
+                write_nodes(&sub, ws, children, claimed, n, report)?;
+            }
+            ModelNode::View { name, tab_index } => {
+                claimed.insert(*tab_index);
+                let Some(tab) = ws.tabs.get(*tab_index) else { continue };
+                let path = unique_path(dir, &crate::workbench::sanitize(name), ".json");
+                persistence::save(&Workspace::single(tab.name.clone(), tab.diagram.clone()), &path).map_err(ImportError::Io)?;
+                *n += 1;
+                report(*n);
+            }
+            // Foundry-ontology-only node kinds — a coArchi import never produces either.
+            ModelNode::Resource { .. } | ModelNode::Link { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+/// `dir.join(format!("{stem}{ext}"))`, or the first `{stem}-2{ext}`, `{stem}-3{ext}`, ... that
+/// nothing already at `dir` is using — so two views sharing a name never overwrite one another.
+fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    let first = dir.join(format!("{stem}{ext}"));
+    if !first.exists() {
+        return first;
+    }
+    let mut i = 2;
+    loop {
+        let path = dir.join(format!("{stem}-{i}{ext}"));
+        if !path.exists() {
+            return path;
+        }
+        i += 1;
+    }
+}
+
 /// Walks one directory: a `folder.xml` names it (or the directory's own name, if it has
 /// none); every other `.xml` file is an element, a relationship, or a view, sorted the same
 /// as any file browser would so the tree reads the way the repository looks on disk. A
 /// sub-directory becomes a child folder, recursively — but only if it actually has anything
 /// in it, so an empty category folder from a model that never used it does not show up as a
 /// dead end.
-fn walk_coarchi_dir(dir: &Path, elements: &mut Vec<RawElement>, relationships: &mut Vec<RawRelationship>, views: &mut Vec<RawView>) -> Result<Vec<ModelNode>, ImportError> {
+fn walk_coarchi_dir(
+    dir: &Path,
+    elements: &mut Vec<RawElement>,
+    relationships: &mut Vec<RawRelationship>,
+    views: &mut Vec<RawView>,
+    report: &mut dyn FnMut(usize),
+) -> Result<Vec<ModelNode>, ImportError> {
     let mut nodes = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return Ok(nodes) };
     let mut entries: Vec<_> = entries.flatten().collect();
@@ -526,7 +797,7 @@ fn walk_coarchi_dir(dir: &Path, elements: &mut Vec<RawElement>, relationships: &
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
-            let children = walk_coarchi_dir(&path, elements, relationships, views)?;
+            let children = walk_coarchi_dir(&path, elements, relationships, views, report)?;
             if !children.is_empty() {
                 let name = read_folder_name(&path).unwrap_or_else(|| path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
                 nodes.push(ModelNode::Folder { name, children, expanded: false });
@@ -539,7 +810,7 @@ fn walk_coarchi_dir(dir: &Path, elements: &mut Vec<RawElement>, relationships: &
         let text = std::fs::read_to_string(&path).map_err(ImportError::Io)?;
         let tree = parse_tree(&text)?;
         if tree.tag == "ArchimateDiagramModel" {
-            let view = read_coarchi_view(&tree);
+            let view = read_coarchi_view(&tree, elements);
             let index = views.len();
             nodes.push(ModelNode::View { name: view_tab_name(&view.name, index), tab_index: index });
             views.push(view);
@@ -550,10 +821,19 @@ fn walk_coarchi_dir(dir: &Path, elements: &mut Vec<RawElement>, relationships: &
                 name: Some(tree.attr("name").to_string()).filter(|s| !s.is_empty()),
                 source: tree.child("source").map(|s| href_id(s.attr("href"))).unwrap_or_default(),
                 target: tree.child("target").map(|t| href_id(t.attr("href"))).unwrap_or_default(),
+                documentation: read_documentation(&tree),
+                tags: read_tags(&tree),
             });
         } else {
-            elements.push(RawElement { id: tree.attr("id").to_string(), kind: tree.tag.clone(), name: tree.attr("name").to_string() });
+            elements.push(RawElement {
+                id: tree.attr("id").to_string(),
+                kind: tree.tag.clone(),
+                name: tree.attr("name").to_string(),
+                documentation: read_documentation(&tree),
+                tags: read_tags(&tree),
+            });
         }
+        report(elements.len() + relationships.len() + views.len());
     }
     Ok(nodes)
 }
@@ -564,11 +844,11 @@ fn read_folder_name(dir: &Path) -> Option<String> {
     Some(tree.attr("name").to_string()).filter(|s| !s.is_empty())
 }
 
-fn read_coarchi_view(tree: &XmlNode) -> RawView {
+fn read_coarchi_view(tree: &XmlNode, elements: &mut Vec<RawElement>) -> RawView {
     let mut nodes = Vec::new();
     let mut connections = Vec::new();
     for child in &tree.children {
-        walk_coarchi_node(child, (0.0, 0.0), &mut nodes, &mut connections);
+        walk_coarchi_node(child, (0.0, 0.0), elements, &mut nodes, &mut connections);
     }
     RawView { name: tree.attr("name").to_string(), nodes, connections }
 }
@@ -576,11 +856,19 @@ fn read_coarchi_view(tree: &XmlNode) -> RawView {
 /// A `<children>` node's own place is its bounds *plus* whatever it sits inside; its own
 /// nested `<children>` need that sum to find theirs in turn, which is why this carries it down
 /// rather than reading every node's bounds as if it were the page's own corner.
-fn walk_coarchi_node(node: &XmlNode, offset: (f64, f64), nodes: &mut Vec<RawNode>, connections: &mut Vec<String>) {
+///
+/// `elements` grows here, not just `nodes`: a sticky note or a view reference has no backing
+/// model element for `archimateElement` to point at, so one is fabricated on the spot (`Note`
+/// and `ViewReference`, the two markers `element_kind` knows) rather than the visual object
+/// being dropped along with everything a plain container's own box already loses nothing by
+/// dropping — its contents are still walked either way.
+fn walk_coarchi_node(node: &XmlNode, offset: (f64, f64), elements: &mut Vec<RawElement>, nodes: &mut Vec<RawNode>, connections: &mut Vec<RawConnection>) {
     if node.tag == "sourceConnections" {
-        if let Some(rel) = node.child("archimateRelationship") {
-            connections.push(href_id(rel.attr("href")));
-        }
+        connections.push(RawConnection {
+            relationship_ref: node.child("archimateRelationship").map(|rel| href_id(rel.attr("href"))),
+            source: node.attr("source").to_string(),
+            target: node.attr("target").to_string(),
+        });
         return;
     }
     if node.tag != "children" {
@@ -591,16 +879,54 @@ fn walk_coarchi_node(node: &XmlNode, offset: (f64, f64), nodes: &mut Vec<RawNode
         None => (0.0, 0.0, 0.0, 0.0),
     };
     let here = (offset.0 + bx, offset.1 + by);
+    let identifier = node.attr("id").to_string();
+    let fill = Colour::parse(node.attr("fillColor"));
+    let line = Colour::parse(node.attr("lineColor"));
     if let Some(el) = node.child("archimateElement") {
-        nodes.push(RawNode { element_ref: href_id(el.attr("href")), x: here.0, y: here.1, w, h });
+        nodes.push(RawNode { identifier, element_ref: href_id(el.attr("href")), x: here.0, y: here.1, w, h, fill, line });
+    } else {
+        let synthetic = match strip_ns(node.attr("type")) {
+            "DiagramModelNote" => Some(("Note".to_string(), node.attr("content").to_string())),
+            "DiagramModelReference" => {
+                let target = node.child("referencedModel").map(|r| href_id(r.attr("href"))).unwrap_or_default();
+                Some(("ViewReference".to_string(), format!("→ view {target}")))
+            }
+            // A plain `DiagramModelGroup`, or anything else with no model element behind it:
+            // left undrawn. Its children, below, are walked regardless.
+            _ => None,
+        };
+        if let Some((kind, name)) = synthetic {
+            elements.push(RawElement { id: identifier.clone(), kind, name, documentation: None, tags: Vec::new() });
+            nodes.push(RawNode { identifier: identifier.clone(), element_ref: identifier, x: here.0, y: here.1, w, h, fill, line });
+        }
     }
     for child in &node.children {
-        walk_coarchi_node(child, here, nodes, connections);
+        walk_coarchi_node(child, here, elements, nodes, connections);
     }
 }
 
 fn attr_f64(node: &XmlNode, key: &str) -> f64 {
     node.attr(key).parse().unwrap_or(0.0)
+}
+
+/// Strips the "archimate:" a coArchi `type`/`xsi:type` *value* always carries — quick_xml's own
+/// `local_name` already strips a namespace from an attribute's *name*, but the value here is a
+/// qualified type name in its own right ("archimate:DiagramModelNote"), not a name quick_xml
+/// has any reason to touch.
+fn strip_ns(s: &str) -> &str {
+    s.rsplit(':').next().unwrap_or(s)
+}
+
+/// `documentation` is a coArchi concept's own attribute, the same as `name` — never a child
+/// element the way the exchange dialect's `<documentation>` is.
+fn read_documentation(node: &XmlNode) -> Option<String> {
+    Some(node.attr("documentation").to_string()).filter(|s| !s.is_empty())
+}
+
+/// Every `<properties key="..." value="..."/>` a coArchi concept carries — Archi's own
+/// "Properties" tab, one child per row.
+fn read_tags(node: &XmlNode) -> Vec<Tag> {
+    node.children.iter().filter(|c| c.tag == "properties").map(|c| Tag { key: c.attr("key").to_string(), value: c.attr("value").to_string() }).collect()
 }
 
 #[cfg(test)]
@@ -670,8 +996,16 @@ mod tests {
         assert_eq!(ws.tabs[0].name, "Main View");
         let placed = &ws.tabs[0].diagram;
         assert_eq!(placed.elements.len(), 2);
-        assert_eq!((placed.elements[0].x, placed.elements[0].y), (1.0, 1.0));
-        assert_eq!((placed.elements[0].w, placed.elements[0].h), (12.0, 3.0));
+        // The file's own bounds (120x60 px, 12x3 cells) are smaller than an ApplicationComponent's
+        // own default — never shrunk below that floor, only ever grown past it.
+        assert_eq!((placed.elements[0].w, placed.elements[0].h), (20.0, 6.0));
+        // Grown from the file's 12-cell width to the floor's 20 in place, CRM and Contacts (10
+        // cells apart at 12 wide) would now overlap by a cell — spread_apart's job is to widen
+        // that gap back out to layout::GUT_X, moving x only: they are in the same row, and this
+        // pass never restacks a row to save a cell of vertical movement instead.
+        assert_eq!(placed.elements[0].y, 1.0, "same row as Contacts; only x should have moved");
+        let gap = placed.elements[1].x - (placed.elements[0].x + placed.elements[0].w);
+        assert!((gap - layout::GUT_X).abs() < 0.2, "gap should be restored to the standard gutter, got {gap}");
         assert_eq!(placed.relations.len(), 1, "only the connection the view actually drew");
         assert_eq!(placed.relations[0].kind, RK::Realization);
 
@@ -680,6 +1014,38 @@ mod tests {
         assert_eq!(unplaced.elements.len(), 1);
         assert_eq!(unplaced.elements[0].label, "Billing");
         assert!(unplaced.relations.is_empty(), "Billing's own relation had no view to be on, and its other end isn't here either");
+    }
+
+    #[test]
+    fn exchange_documentation_carries_over_and_a_relationship_less_connection_draws_as_a_link() {
+        const WITH_DOCS: &str = r#"<model xmlns="http://www.opengroup.org/xsd/archimate/3.0/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" identifier="id-model">
+  <elements>
+    <element identifier="id-1" xsi:type="ApplicationComponent">
+      <name>CRM</name>
+      <documentation>What CRM does</documentation>
+    </element>
+    <element identifier="id-2" xsi:type="Junction" />
+  </elements>
+  <views>
+    <diagrams>
+      <view identifier="id-v1" xsi:type="Diagram">
+        <name>Main View</name>
+        <node identifier="id-n1" xsi:type="Element" elementRef="id-1" x="0" y="0" w="120" h="60" />
+        <node identifier="id-n2" xsi:type="Element" elementRef="id-2" x="300" y="0" w="60" h="60" />
+        <connection identifier="id-c1" xsi:type="Relationship" source="id-n1" target="id-n2" />
+      </view>
+    </diagrams>
+  </views>
+</model>"#;
+        let ws = from_xml(WITH_DOCS, "fallback").expect("imports");
+        let doc = &ws.tabs[0].diagram;
+        assert_eq!(doc.elements.len(), 2);
+        let crm = doc.elements.iter().find(|e| e.label == "CRM").expect("CRM");
+        assert_eq!(crm.documentation.as_deref(), Some("What CRM does"));
+        assert!(doc.elements.iter().any(|e| e.kind == SK::Circle), "the junction drew as a circle, the same as the coArchi dialect");
+        // The connection has no `relationshipRef` at all — a purely visual line Archi allows.
+        assert_eq!(doc.relations.len(), 1, "drawn rather than dropped");
+        assert_eq!(doc.relations[0].kind, RK::Link);
     }
 
     #[test]
@@ -790,6 +1156,9 @@ mod tests {
             assert_eq!(doc.elements.len(), 2);
             let crm = doc.elements.iter().find(|e| e.label == "CRM").expect("CRM");
             assert_eq!((crm.x, crm.y), (10.0, 2.5), "n1's bounds are already relative to the page");
+            // The view drew it at 120x55 px (12x2.75 cells) — Archi's own idea of a
+            // comfortable size, not this app's. Never shrunk below the kind's own default.
+            assert_eq!((crm.w, crm.h), (20.0, 6.0), "grown to ApplicationComponent's own floor, not left at the file's tiny one");
             let contacts = doc.elements.iter().find(|e| e.label == "Contacts").expect("Contacts");
             assert_eq!((contacts.x, contacts.y), (31.0, 11.0), "n2's (10,20) plus its parent's (300,200), in cells");
             assert_eq!(doc.relations.len(), 1);
@@ -813,6 +1182,117 @@ mod tests {
                 other => panic!("expected a folder, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn write_workbench_mirrors_folders_one_file_per_view_and_keeps_unclaimed_tabs_at_the_top() {
+        let mut root = std::env::temp_dir();
+        root.push(format!("vim-shapes-coarchi-write-{}", std::process::id()));
+        write_coarchi_fixture(&root);
+        // A third element the view's own `<children>` never mention — `build`'s own
+        // "(unplaced)" tab, which has no `ModelNode` of its own since the tree only reflects
+        // what walking the folder actually found as a view.
+        std::fs::write(
+            root.join("model/application/ApplicationComponent_a3.xml"),
+            r#"<archimate:ApplicationComponent xmlns:archimate="http://www.archimatetool.com/archimate" name="Billing" id="a3"/>"#,
+        )
+        .unwrap();
+
+        let (ws, tree) = import_coarchi(&root).expect("imports");
+        assert_eq!(ws.tabs.len(), 2, "the view's own tab, and one for Billing, which no view drew");
+        assert_eq!(ws.tabs[1].name, "(unplaced)");
+
+        let dst = root.join("out");
+        let n = write_workbench(&dst, &ws, &tree, &mut |_| {}).expect("writes");
+        assert_eq!(n, 2);
+
+        let placed = persistence::load(&dst.join("diagrams").join("Main View.json")).expect("the view's own file, in the folder it belongs to");
+        assert_eq!(placed.tabs[0].diagram.elements.len(), 2, "CRM and Contacts, exactly what the view drew");
+
+        let unplaced = persistence::load(&dst.join("(unplaced).json")).expect("Billing landed at the top, rather than being dropped");
+        assert_eq!(unplaced.tabs[0].diagram.elements[0].label, "Billing");
+
+        // Running it again must not clobber the first run's own file.
+        let n2 = write_workbench(&dst, &ws, &tree, &mut |_| {}).expect("writes again");
+        assert_eq!(n2, 2);
+        assert!(dst.join("diagrams").join("Main View-2.json").is_file(), "a second run numbers the collision rather than overwriting");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_coarchi_view_recovers_what_growth_alone_would_drop() {
+        let mut root = std::env::temp_dir();
+        root.push(format!("vim-shapes-coarchi-recover-{}", std::process::id()));
+        let model = root.join("model");
+        std::fs::create_dir_all(model.join("application")).unwrap();
+        std::fs::create_dir_all(model.join("other")).unwrap();
+        std::fs::create_dir_all(model.join("diagrams")).unwrap();
+
+        std::fs::write(model.join("folder.xml"), r#"<archimate:ArchimateModel xmlns:archimate="http://www.archimatetool.com/archimate" name="Recover" id="m1"/>"#).unwrap();
+        std::fs::write(
+            model.join("application/ApplicationComponent_a1.xml"),
+            r#"<archimate:ApplicationComponent xmlns:archimate="http://www.archimatetool.com/archimate" name="CRM" id="a1" documentation="What CRM does">
+  <properties key="Owner" value="Team A"/>
+</archimate:ApplicationComponent>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            model.join("other/Junction_j1.xml"),
+            r#"<archimate:Junction xmlns:archimate="http://www.archimatetool.com/archimate" id="j1"/>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            model.join("diagrams/ArchimateDiagramModel_v1.xml"),
+            r##"<archimate:ArchimateDiagramModel xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:archimate="http://www.archimatetool.com/archimate" name="Main View" id="v1">
+  <children xsi:type="archimate:DiagramModelArchimateObject" id="n1" fillColor="#112233" lineColor="#445566">
+    <bounds x="0" y="0" width="200" height="80"/>
+    <sourceConnections xsi:type="archimate:DiagramModelConnection" id="c1" source="n1" target="n2"/>
+    <archimateElement xsi:type="archimate:ApplicationComponent" href="ApplicationComponent_a1.xml#a1"/>
+  </children>
+  <children xsi:type="archimate:DiagramModelArchimateObject" id="n2">
+    <bounds x="300" y="0" width="60" height="60"/>
+    <archimateElement xsi:type="archimate:Junction" href="Junction_j1.xml#j1"/>
+  </children>
+  <children xsi:type="archimate:DiagramModelNote" id="note1" content="Hello note">
+    <bounds x="0" y="200" width="150" height="60"/>
+  </children>
+  <children xsi:type="archimate:DiagramModelReference" id="ref1">
+    <bounds x="300" y="200" width="150" height="60"/>
+    <referencedModel href="ArchimateDiagramModel_v2.xml#v2"/>
+  </children>
+</archimate:ArchimateDiagramModel>"##,
+        )
+        .unwrap();
+
+        let (ws, _tree) = import_coarchi(&root).expect("imports");
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(ws.tabs.len(), 1);
+        let doc = &ws.tabs[0].diagram;
+        assert_eq!(doc.elements.len(), 4, "CRM, the junction, the note, and the view reference — none dropped");
+
+        let crm = doc.elements.iter().find(|e| e.label == "CRM").expect("CRM");
+        assert_eq!(crm.documentation.as_deref(), Some("What CRM does"));
+        assert_eq!(crm.tags, vec![Tag { key: "Owner".into(), value: "Team A".into() }]);
+        assert_eq!(crm.fill, Fill::Colour(Colour::Hex([0x11, 0x22, 0x33])), "the view's own fillColor, not the layer's");
+        assert_eq!(crm.color, Some(Colour::Hex([0x44, 0x55, 0x66])), "the view's own lineColor, as the outline override");
+
+        // A Junction has no concept of its own here — it draws as the same plain circle a
+        // sketch uses for a node, rather than the generic labelled box an unmapped type gets.
+        assert!(doc.elements.iter().any(|e| e.kind == SK::Circle), "the junction drew as a circle");
+
+        let note = doc.elements.iter().find(|e| e.label == "Hello note").expect("the note kept its own text instead of being dropped with its box");
+        assert_eq!(note.kind, SK::Text);
+
+        let reference = doc.elements.iter().find(|e| e.kind == SK::Text && e.label != "Hello note").expect("the view reference kept a pointer to what it names");
+        assert_eq!(reference.label, "→ view v2");
+
+        // n1 (CRM) and n2 (the junction) are joined by a `sourceConnections` with no
+        // `archimateRelationship` at all — a purely visual line, drawn as a plain link rather
+        // than lost.
+        assert_eq!(doc.relations.len(), 1, "the one visual-only connection, drawn rather than dropped");
+        assert_eq!(doc.relations[0].kind, RK::Link);
     }
 
     #[test]

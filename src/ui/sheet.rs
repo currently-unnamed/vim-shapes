@@ -112,6 +112,26 @@ impl State {
         self.remembered = self.field().map(|f| f.name);
     }
 
+    /// A click on a tab's own label — lands on it directly, rather than stepping there the
+    /// way `Tab`/`BackTab` do. Same reset as `next_tab`: a different tab has a different
+    /// field list, so landing at its top is safer than carrying an index across.
+    pub fn select_tab(&mut self, t: Tab) {
+        self.tab = t;
+        self.editing = None;
+        self.sel = 0;
+        self.remembered = self.field().map(|f| f.name);
+    }
+
+    /// Lands on field `i` directly — the mouse's equivalent of walking there one step at a
+    /// time with `move_by`. Out of range is silently ignored, the way a click past the last
+    /// row of any list here already is.
+    pub fn select(&mut self, i: usize) {
+        if i < self.fields().len() {
+            self.sel = i;
+            self.remembered = self.field().map(|f| f.name);
+        }
+    }
+
     pub fn step_in(&mut self) {
         if let Some(f) = self.field()
             && f.unit != Unit::Action
@@ -158,6 +178,39 @@ impl State {
         };
         Some(names[i as usize].clone())
     }
+
+    /// Which field a screen point lands on — the same two-line-per-field layout `render`
+    /// draws, value line and unit line together, so a click on either still lands on the
+    /// field itself. `area` is the sheet's own rect, wherever it was placed (docked or
+    /// floating) — the one geometry both `render` and this read, so they can never disagree
+    /// about where a field actually is.
+    pub fn field_at(&self, area: Rect, col: u16, row: u16) -> Option<usize> {
+        let body = chrome::panel_body(area, true);
+        let list = Rect { y: body.y + 2, height: body.height.saturating_sub(2), ..body };
+        if col < list.x || col >= list.right() || row < list.y || row >= list.bottom() {
+            return None;
+        }
+        let i = ((row - list.y) / 2) as usize;
+        (i < self.fields().len()).then_some(i)
+    }
+}
+
+/// Which tab a screen point lands on — the same one line `render` draws them all into.
+/// Doesn't depend on `State`: the tab strip's layout is the same whichever tab is current.
+pub fn tab_at(area: Rect, col: u16, row: u16) -> Option<Tab> {
+    let body = chrome::panel_body(area, true);
+    if row != body.y {
+        return None;
+    }
+    let mut x = body.x + 1; // the leading space `render` puts before the first tab
+    for t in Tab::ALL {
+        let w = t.name().chars().count() as u16 + 2; // " name "
+        if col >= x && col < x + w {
+            return Some(t);
+        }
+        x += w + 1; // the separator space `render` puts after every tab
+    }
+    None
 }
 
 pub struct Sheet<'a> {
@@ -295,5 +348,41 @@ mod tests {
         s.step_into_text();
         assert_eq!((s.tab, s.field().unwrap().name), (Tab::Text, "label"));
         assert_eq!(s.editing.as_deref(), Some("CRM"));
+    }
+
+    #[test]
+    fn tab_at_finds_the_tab_under_the_tab_strip_and_nothing_off_it() {
+        let area = Rect::new(0, 0, 40, 20);
+        // The strip is one row below the title bar: `chrome::panel_body`'s own `body.y`.
+        assert_eq!(tab_at(area, 5, 0), None, "the title bar, not the strip");
+        assert_eq!(tab_at(area, 5, 1), Some(Tab::Style), "into \" style \"");
+        assert_eq!(tab_at(area, 9, 1), None, "the separator space between style and text");
+        assert_eq!(tab_at(area, 10, 1), Some(Tab::Text), "into \" text \"");
+        assert_eq!(tab_at(area, 17, 1), Some(Tab::Arrange), "into \" arrange \"");
+        assert_eq!(tab_at(area, 39, 1), None, "past the last tab");
+    }
+
+    #[test]
+    fn field_at_finds_the_field_under_either_of_its_two_lines() {
+        let (d, a, _, _) = doc();
+        let s = State::open(&d, Some(Target::Element(a)), &[]);
+        let area = Rect::new(0, 0, 40, 20);
+        assert_eq!(s.field_at(area, 5, 2), None, "the blank row between the tabs and the fields");
+        assert_eq!(s.field_at(area, 5, 3), Some(0), "the first field's value line");
+        assert_eq!(s.field_at(area, 5, 4), Some(0), "and its unit line, still the same field");
+        assert_eq!(s.field_at(area, 5, 5), Some(1), "the second field starts two rows down");
+        assert_eq!(s.field_at(area, 0, 3), None, "off the left edge");
+    }
+
+    #[test]
+    fn a_click_lands_on_a_field_and_a_tab_the_same_way_the_keyboard_would() {
+        let (d, a, _, _) = doc();
+        let mut s = State::open(&d, Some(Target::Element(a)), &[]);
+        s.select(2);
+        assert_eq!(s.sel, 2, "lands directly, unlike move_by's step");
+        s.select(1000);
+        assert_eq!(s.sel, 2, "out of range: ignored, not clamped onto the last field");
+        s.select_tab(Tab::Arrange);
+        assert_eq!((s.tab, s.sel, s.editing), (Tab::Arrange, 0, None), "the same reset next_tab gives a stepped-to tab");
     }
 }

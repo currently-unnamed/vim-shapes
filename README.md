@@ -52,12 +52,13 @@ cargo run --release -- diagrams/example.json # opens a file
 cargo install --path .                       # puts `vim-shapes` on your PATH
 ```
 
-Two headless modes print and exit:
+A few headless modes print and exit:
 
 ```sh
 vim-shapes --check diagram.json   # lint a file: every relation the rules refuse, every element outside the view
 vim-shapes --ontology             # the whole ontology as JSON — layers, kinds, relations, rules, idioms
 vim-shapes --render d.json out.png [--tab N] [--px 20] [--font <path>]   # one tab as a PNG
+vim-shapes --import-coarchi <src> <dst>   # a coArchi model repository, written straight to a workbench folder
 ```
 
 `cargo test` runs the suite. The source is hand-formatted; please don't run `cargo fmt` over it.
@@ -165,7 +166,7 @@ A relation is a stop on the walk like any shape: `h j k l` land on it, at the mi
 | `gd` | go to the element at this end (`^o` comes back) |
 | `Esc` | back to the element |
 
-`c` on a relation opens the sheet on it: its kind and its look — a `look` preset for the line colour, `route` (orthogonal by default — it leaves along the longer axis, turns, crosses and turns in, with `elbow` on the arrange tab setting where in cells from the tail; or straight; or curved), line (solid, dashed, dotted), width (1 to 3 dots), either end (arrows, triangles, diamonds, dots, and the ERD crow's foot, bar and ring), `end size` (small, normal, large), colour, and `opacity`; its three labels, with their own `font`, `size`, `bold`, `italic`, `text colour` and `label band`, and `label at`, where along the line the centre label sits in per cent; and, on the arrange tab, the port at each end and `reverse`, which swaps the ends of a line drawn the wrong way round. A kind gives the look its default, and a setting made here becomes the relation's own.
+`c` on a relation opens the sheet on it: its kind and its look — a `look` preset for the line colour, `route` (orthogonal by default — it leaves along the longer axis, turns, crosses and turns in, with `elbow` on the arrange tab setting where, in per cent along that first leg from the tail — so the turn stays proportionally put as the two shapes move; or straight; or curved), line (solid, dashed, dotted), width (1 to 3 dots), either end (arrows, triangles, diamonds, dots, and the ERD crow's foot, bar and ring), `end size` (small, normal, large), colour, and `opacity`; its three labels, with their own `font`, `size`, `bold`, `italic`, `text colour` and `label band`, and `label at`, where along the line the centre label sits in per cent; and, on the arrange tab, the port at each end and `reverse`, which swaps the ends of a line drawn the wrong way round. A kind gives the look its default, and a setting made here becomes the relation's own. An orthogonal route with no `elbow` of its own picks one that clears any third shape sitting between its ends, rather than always the plain midpoint — bend it by hand once (`i` on the relation grabs its one turn, `h j k l` pulls it) and that choice is yours to keep; the app never nudges it again.
 
 The kinds — composition, aggregation, assignment, realization, serving, access, influence, triggering, flow, specialization, association, and the plain link — are described in `:help relation-kinds`, and each has its own page. The one lesson worth knowing first: **the layer above never touches a component directly.** It uses a *service*, which the component *realizes*. `:help rules` has the rest.
 

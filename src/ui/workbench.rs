@@ -197,11 +197,61 @@ impl State {
         self.sel = (self.sel as isize + delta).rem_euclid(n as isize) as usize;
     }
 
+    /// `^d`/`^u`'s own jump — clamped, not wrapped like `move_by`: landing past either end
+    /// and wrapping around would leap clear across the tree instead of paging through it.
+    pub fn page_by(&mut self, delta: isize, n: usize) {
+        if n == 0 {
+            self.sel = 0;
+            return;
+        }
+        self.sel = (self.sel as isize + delta).clamp(0, n as isize - 1) as usize;
+    }
+
+    /// How many rows of the list fit on screen right now — a page, for `page_by` — the same
+    /// arithmetic `render` and `row_at` already use to keep the widget and its hit-test in
+    /// step.
+    pub fn page_size(&self, area: Rect) -> usize {
+        let body = chrome::panel_body(area, true);
+        (body.height.saturating_sub(self.header_lines())) as usize
+    }
+
     /// `/`'s own typing — same shape as `tree::State::retype`, resetting `sel` so a narrower
     /// (or wider) list never leaves the cursor stranded past its end or on an unrelated row.
     pub fn retype(&mut self, f: impl FnOnce(&mut String)) {
         f(&mut self.filter);
         self.sel = 0;
+    }
+
+    /// How many lines sit above the row list itself — the `/` filter line, when it's shown.
+    /// One function, so the widget's own offset and a mouse hit-test's can never disagree.
+    fn header_lines(&self) -> u16 {
+        if self.root.is_some() && (self.filtering || !self.filter.is_empty()) { 1 } else { 0 }
+    }
+
+    /// The first row shown, given how many rows there are and how many fit — `ctxmenu::
+    /// State::scroll`'s own reasoning, so a long tree keeps `sel` roughly centred rather than
+    /// pinned to whichever edge it walked off of.
+    fn scroll(&self, n: usize, view: usize) -> usize {
+        if view == 0 {
+            return 0;
+        }
+        self.sel.saturating_sub(view / 2).min(n.saturating_sub(view))
+    }
+
+    /// Which row a screen point lands on — not the title bar, the hint line, the `/` filter
+    /// line, or a "new:" line being typed, none of which are `sel`-addressable. `area` is the
+    /// panel's own rect, from `App::workbench_area`; `n` is how many rows are in the list
+    /// right now (`display_rows`'s length, or `recents`' while no root is chosen) — not
+    /// available from `State` alone without the registry `display_rows` itself needs.
+    pub fn row_at(&self, area: Rect, n: usize, col: u16, row: u16) -> Option<usize> {
+        let body = chrome::panel_body(area, true);
+        let header = self.header_lines();
+        if col < body.x || col >= body.right() || row < body.y + header || row >= body.bottom() {
+            return None;
+        }
+        let view = (body.height.saturating_sub(header)) as usize;
+        let i = self.scroll(n, view) + (row - body.y - header) as usize;
+        (i < n).then_some(i)
     }
 }
 
@@ -302,8 +352,8 @@ impl Widget for Browser<'_> {
             (true, _, _, _) => " type to search — enter keeps it, esc clears it",
             (false, Some(_), _, _) => " type a name — enter, or esc",
             (false, None, Some(_), _) => " navigate, then p to put it here — esc cancels the move",
-            (false, None, None, Some(_)) => " j/k move  enter open  i insert  / search  g/ grep  n diagram  N folder  r rename  m move  d delete  esc",
-            (false, None, None, None) => " j/k move  enter opens it  esc closes",
+            (false, None, None, Some(_)) => " j/k move  ^d/^u page  enter open  i insert  / search  g/ grep  n diagram  N folder  r rename  m move  d delete  esc",
+            (false, None, None, None) => " j/k move  ^d/^u page  enter opens it  esc closes",
         };
         let body = chrome::hint(buf, inner, hint);
         if body.height < 2 {
@@ -323,7 +373,9 @@ impl Widget for Browser<'_> {
             if s.recents.is_empty() {
                 lines.push(Line::styled(" no workbench opened yet — :workbench <path>", Style::new().fg(theme::t().dim)));
             }
-            for (i, p) in s.recents.iter().enumerate() {
+            let view = body.height as usize;
+            let off = s.scroll(s.recents.len(), view);
+            for (i, p) in s.recents.iter().enumerate().skip(off).take(view) {
                 let on = i == s.sel;
                 let style = if on { Style::new().fg(theme::t().inverse).bg(theme::t().aqua).bold() } else { Style::new().fg(theme::t().ink) };
                 lines.push(Line::styled(format!("{}{}", chrome::marker(on), p.display()), style));
@@ -338,7 +390,12 @@ impl Widget for Browser<'_> {
         } else if all.is_empty() && s.editing.is_none() {
             lines.push(Line::styled(" empty — n adds a diagram, N a folder", Style::new().fg(theme::t().dim)));
         }
-        for (i, row) in all.iter().enumerate() {
+        // Scrolled the same way `ctxmenu`'s own list is: `row_at`'s hit-test reads the exact
+        // same `scroll` a long tree needs to keep `sel` in view at all, rather than every row
+        // past whatever fits just running off the bottom of the panel.
+        let view = (body.height as usize).saturating_sub(s.header_lines() as usize);
+        let off = s.scroll(all.len(), view);
+        for (i, row) in all.iter().enumerate().skip(off).take(view) {
             let on = i == s.sel;
             match row {
                 DisplayRow::Fs(row) => {
@@ -563,5 +620,41 @@ mod tests {
         st.toggle_group(GroupId::Kind(ShapeKind::ApplicationComponent));
         let out = dump(&render(50, 12, &st, Some(&reg)));
         assert!(out.contains("CRM"), "opened all the way down to the element: {out}");
+    }
+
+    #[test]
+    fn row_at_finds_the_row_under_the_title_bar_and_hint_line_excluded() {
+        let mut st = State::opened(PathBuf::from("/root"));
+        st.nodes = sample();
+        let area = Rect::new(0, 0, 50, 10);
+        let n = st.display_rows(None).len();
+        assert_eq!(st.row_at(area, n, 5, 0), None, "the title bar");
+        assert_eq!(st.row_at(area, n, 5, 1), Some(0), "the first row, right under it");
+        assert_eq!(st.row_at(area, n, 0, 1), None, "off the left edge");
+        assert_eq!(st.row_at(area, n, 5, 100), None, "well past the last visible row");
+    }
+
+    #[test]
+    fn row_at_skips_the_filter_line_when_one_is_showing() {
+        let mut st = State::opened(PathBuf::from("/root"));
+        st.nodes = sample();
+        st.filtering = true;
+        let area = Rect::new(0, 0, 50, 10);
+        let n = st.display_rows(None).len();
+        assert_eq!(st.row_at(area, n, 5, 1), None, "the / line itself, not a row");
+        assert_eq!(st.row_at(area, n, 5, 2), Some(0), "the first real row, one line lower");
+    }
+
+    #[test]
+    fn row_at_agrees_with_a_long_list_s_own_scroll() {
+        let recents: Vec<PathBuf> = (0..20).map(|i| PathBuf::from(format!("/w{i}"))).collect();
+        let mut st = State::recents(recents);
+        st.sel = 15;
+        let area = Rect::new(0, 0, 50, 10);
+        // The title row and the hint row are the only two `panel`/`hint` spend here, so the
+        // body is 8 rows tall — `scroll` keeps `sel` centred rather than pinned to an edge.
+        let off = st.scroll(20, 8);
+        assert_eq!(st.row_at(area, 20, 5, 1), Some(off), "the first visible row is wherever scroll put it");
+        assert_eq!(st.row_at(area, 20, 5, 1 + (15 - off) as u16), Some(15), "sel itself is still findable, scrolled into view");
     }
 }

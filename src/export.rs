@@ -132,10 +132,11 @@ impl Default for Options {
 }
 
 impl Options {
-    /// What `V` previews: the clean picture, on paper, with its grid — the look of a desktop
-    /// diagram tool, no questions asked.
+    /// What `V` previews: the clean picture, on paper, no grid — the shapes and relations are
+    /// what the eye should land on, not graph paper under them. The grid is still there to
+    /// turn on from the export dialog; it just is not what a first look defaults to.
     pub fn preview() -> Options {
-        Options { style: Style::Clean, appearance: Appearance::Light, grid: true, ..Options::default() }
+        Options { style: Style::Clean, appearance: Appearance::Light, grid: false, ..Options::default() }
     }
 }
 
@@ -632,12 +633,12 @@ mod tests {
     fn the_picture_is_the_diagram_with_a_border_at_the_zoom_asked() {
         let o = Options::default();
         let p = picture(&doc(), &o);
-        // 10..52 across, 6..12 down, two cells of border: 46 × 10 cells.
-        assert_eq!((p.width, p.height), (460, 200));
+        // 10..60 across, 6..12 down, two cells of border: 54 × 10 cells.
+        assert_eq!((p.width, p.height), (540, 200));
         assert!(p.items.iter().any(|i| matches!(i, Item::Text { text, .. } if text == "Billing")));
         assert!(p.items.iter().any(|i| matches!(i, Item::Text { text, .. } if text == "reads")));
         let o2 = Options { zoom: 200, ..o };
-        assert_eq!(picture(&doc(), &o2).width, 920, "zoom scales the picture");
+        assert_eq!(picture(&doc(), &o2).width, 1080, "zoom scales the picture");
         let o3 = Options { transparent: true, ..Options::default() };
         assert!(picture(&doc(), &o3).ground.is_none());
     }
@@ -708,7 +709,7 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes).to_string();
         assert!(text.starts_with("%PDF-1.4"));
         assert!(text.contains("(Billing) Tj"));
-        assert!(text.contains("(<v2>) Tj"), "parentheses are what needs escaping, not angle brackets");
+        assert!(text.contains("(invoice <v2>) Tj"), "parentheses are what needs escaping, not angle brackets");
         // Every xref offset points at "N 0 obj".
         let xref_at: usize = text.rsplit("startxref\n").next().unwrap().trim().lines().next().unwrap().parse().unwrap();
         let table = &text[xref_at..];

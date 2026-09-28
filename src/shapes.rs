@@ -611,13 +611,14 @@ fn shorten(a: Point, b: Point, by_a: f64, by_b: f64) -> (Point, Point) {
 /// so the picture on screen and the picture in the file agree.
 /// The line a relation takes from `p1` to `p2`, as the points it passes through.
 ///
-/// Straight is the two ends. Orthogonal leaves along the longer axis, turns at `elbow` cells
-/// from the tail (half way when blank), crosses, and turns again into the head — three legs
-/// at right angles, the way a desktop tool routes. Curved is a cubic whose handles point
-/// along that same axis, sampled finely enough that braille and paper both see a curve.
-/// Told which way to leave first: across (from a side) or down (from a top or bottom edge),
-/// so an orthogonal route never runs along the edge it starts on; `None` picks the longer
-/// axis.
+/// Straight is the two ends. Orthogonal leaves along the longer axis, turns `elbow` per cent
+/// of the way along its first leg (half way when blank), crosses, and turns again into the
+/// head — three legs at right angles, the way a desktop tool routes. A fraction of the leg,
+/// not a cell count, so the turn stays proportionally where it was put as the two ends move
+/// apart or together. Curved is a cubic whose handles point along that same axis, sampled
+/// finely enough that braille and paper both see a curve. Told which way to leave first:
+/// across (from a side) or down (from a top or bottom edge), so an orthogonal route never
+/// runs along the edge it starts on; `None` picks the longer axis.
 pub fn route_from(p1: Point, p2: Point, route: crate::ontology::Route, elbow: Option<i64>, across_first: Option<bool>) -> Vec<Point> {
     use crate::ontology::Route;
     let (dx, dy) = (p2.0 - p1.0, p2.1 - p1.1);
@@ -627,10 +628,10 @@ pub fn route_from(p1: Point, p2: Point, route: crate::ontology::Route, elbow: Op
         Route::Straight => vec![p1, p2],
         Route::Orthogonal => {
             if across {
-                let mx = p1.0 + elbow.map_or(dx / 2.0, |e| e as f64 * dx.signum());
+                let mx = p1.0 + elbow.map_or(dx / 2.0, |pct| dx * pct as f64 / 100.0);
                 vec![p1, (mx, p1.1), (mx, p2.1), p2]
             } else {
-                let my = p1.1 + elbow.map_or(dy / 2.0, |e| e as f64 * dy.signum());
+                let my = p1.1 + elbow.map_or(dy / 2.0, |pct| dy * pct as f64 / 100.0);
                 vec![p1, (p1.0, my), (p2.0, my), p2]
             }
         }
@@ -647,6 +648,22 @@ pub fn route_from(p1: Point, p2: Point, route: crate::ontology::Route, elbow: Op
                 .collect()
         }
     }
+}
+
+/// Whether an orthogonal route's own legs — each one flat or upright, never both — pass
+/// through the inside of `rect`, not just touch it: a route legitimately starts and ends
+/// flush with the two shapes it actually joins, so only a leg that crosses fully into a
+/// *third* one's boundary counts.
+pub fn route_crosses(pts: &[Point], rect: (f64, f64, f64, f64)) -> bool {
+    let (rx, ry, rw, rh) = rect;
+    pts.windows(2).any(|w| {
+        let (a, b) = (w[0], w[1]);
+        if (a.1 - b.1).abs() < f64::EPSILON {
+            a.1 > ry && a.1 < ry + rh && a.0.min(b.0) < rx + rw && a.0.max(b.0) > rx
+        } else {
+            a.0 > rx && a.0 < rx + rw && a.1.min(b.1) < ry + rh && a.1.max(b.1) > ry
+        }
+    })
 }
 
 /// The point `t` of the way along a route, by length as the eye sees it — where a label
@@ -883,8 +900,8 @@ mod route_tests {
         assert_eq!(route_from(p1, p2, Route::Straight, None, None), vec![p1, p2]);
         let o = route_from(p1, p2, Route::Orthogonal, None, None);
         assert_eq!(o, vec![p1, (20.0, 0.0), (20.0, 10.0), p2], "half way across, then down");
-        let o = route_from(p1, p2, Route::Orthogonal, Some(5), None);
-        assert_eq!(o[1], (5.0, 0.0), "an elbow: five cells from the tail");
+        let o = route_from(p1, p2, Route::Orthogonal, Some(25), None);
+        assert_eq!(o[1], (10.0, 0.0), "an elbow: a quarter of the way along the first leg");
         let o = route_from((0.0, 0.0), (4.0, 20.0), Route::Orthogonal, None, None);
         assert_eq!(o[1], (0.0, 10.0), "mostly down: leaves downward first");
         let c = route_from(p1, p2, Route::Curved, None, None);
@@ -893,6 +910,15 @@ mod route_tests {
         assert!(mid.1 > 2.0 && mid.1 < 8.0 && mid.0 > 15.0 && mid.0 < 25.0, "the curve passes near the middle: {mid:?}");
         assert_eq!(along(&[p1, (20.0, 0.0), (20.0, 10.0), p2], 0.5).0, 20.0, "half way along the orthogonal route is on its cross leg");
         assert_eq!(along(&[p1, p2], 0.25), (10.0, 2.5));
+    }
+
+    #[test]
+    fn route_crosses_a_box_in_its_own_path_but_not_one_beside_it_or_merely_touched() {
+        let pts = vec![(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (40.0, 10.0)];
+        assert!(route_crosses(&pts, (18.0, 4.0, 4.0, 4.0)), "the vertical leg runs straight through it");
+        assert!(!route_crosses(&pts, (25.0, 4.0, 4.0, 4.0)), "well off to the side of every leg");
+        assert!(!route_crosses(&pts, (18.0, -4.0, 4.0, 4.0)), "touches the flat leg's own row from above, never inside it");
+        assert!(!route_crosses(&pts, (0.0, 0.0, 4.0, 4.0)), "flush with the route's own start, not a third shape in its way");
     }
 
     #[test]

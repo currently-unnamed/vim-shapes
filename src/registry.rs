@@ -13,7 +13,10 @@
 //! properties are resolved silently here — the sighting with the most properties wins, first
 //! seen breaks a tie — since that drift is not the "resolve the conflict" this module means:
 //! only a fresh ontology `:import` disagreeing with what is already known gets the
-//! interactive resolution (`ui::conflictpick`, which reads this module's `Entry` too).
+//! interactive resolution (`ui::conflictpick`, which reads this module's `Entry` too). A
+//! `:import` naming something the registry has never seen is not a conflict at all —
+//! [`Registry::absorb`] adds it as a real `Entry` on the spot, `seen_in: 0`, so it appears in
+//! the workbench's elements the moment the export is read, with nothing drawn yet.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -166,6 +169,29 @@ impl Registry {
         if let Some(e) = self.entries.get_mut(key) {
             e.properties = properties;
         }
+    }
+
+    /// A fresh Foundry import's other half of `conflicts_with`: every `Key` it defines that
+    /// this registry has never seen becomes a real `Entry` right away — `seen_in: 0`, since
+    /// nothing is drawn yet, just known — so it shows up in the workbench's elements section
+    /// and is placeable (`Registry::place`) without anyone walking the tree by hand first. A
+    /// `Key` already known but redefined differently is left alone here; it comes back as a
+    /// `Conflict` instead, for `ui::conflictpick` to resolve into `apply_incoming`.
+    pub fn absorb(&mut self, index: &crate::foundry_import::Index) -> Vec<Conflict> {
+        let conflicts = self.conflicts_with(index);
+        for d in index.defined() {
+            let key = Key { kind: d.kind, ident: Ident::Api(d.api_name.clone()) };
+            self.entries.entry(key.clone()).or_insert_with(|| Entry {
+                key,
+                name: d.display_name,
+                api_name: Some(d.api_name),
+                properties: d.properties,
+                status: d.status,
+                seen_in: 0,
+                seen_paths: Vec::new(),
+            });
+        }
+        conflicts
     }
 }
 
@@ -409,6 +435,53 @@ mod tests {
         let mut settled = reg;
         settled.apply_incoming(&conflicts[0].key, conflicts[0].incoming.clone());
         assert!(settled.conflicts_with(&index).is_empty());
+    }
+
+    #[test]
+    fn absorb_adds_every_new_defined_type_without_touching_a_conflicting_one() {
+        let key = Key { kind: ShapeKind::ObjectType, ident: Ident::Api("customer".into()) };
+        let mut entries = HashMap::new();
+        entries.insert(key.clone(), Entry { key: key.clone(), name: "Customer".into(), api_name: Some("customer".into()), properties: vec![Property::new("id")], status: Status::Active, seen_in: 1, seen_paths: Vec::new() });
+        let mut reg = Registry { entries, edges: Vec::new() };
+
+        let index = foundry_fixture(
+            r#"{
+                "version": 2,
+                "objectTypes": [
+                    {
+                        "id": "ot.customer", "apiName": "customer",
+                        "displayMetadata": {"displayName": "Customer"},
+                        "status": {"type": "active"}, "typeGroups": [], "interfaces": [],
+                        "primaryKeys": ["p.id"], "titlePropertyId": null,
+                        "properties": [
+                            {"id": "p.id", "apiName": "id", "displayMetadata": {"displayName": "Id", "visibility": "NORMAL"}, "status": {"type": "active"}, "baseType": {"type": "STRING"}},
+                            {"id": "p.name", "apiName": "name", "displayMetadata": {"displayName": "Name", "visibility": "NORMAL"}, "status": {"type": "active"}, "baseType": {"type": "STRING"}}
+                        ],
+                        "datasources": []
+                    },
+                    {
+                        "id": "ot.brandnewabsorbed", "apiName": "brand_new_absorbed_type",
+                        "displayMetadata": {"displayName": "Brand New Absorbed Type"},
+                        "status": {"type": "active"}, "typeGroups": [], "interfaces": [],
+                        "primaryKeys": [], "titlePropertyId": null, "properties": [], "datasources": []
+                    }
+                ],
+                "interfaces": [], "relations": [], "actionTypes": [], "sharedProperties": []
+            }"#,
+        );
+
+        let conflicts = reg.absorb(&index);
+        assert_eq!(conflicts.len(), 1, "customer's properties changed — a conflict, resolved separately");
+        assert_eq!(conflicts[0].name, "Customer");
+
+        let existing = reg.entries.get(&key).unwrap();
+        assert_eq!(existing.properties.len(), 1, "absorb never overwrites a conflicting entry itself — only apply_incoming does");
+
+        let new_key = Key { kind: ShapeKind::ObjectType, ident: Ident::Api("brand_new_absorbed_type".into()) };
+        let added = reg.entries.get(&new_key).expect("this key had no conflict, so it is a real entry now");
+        assert_eq!(added.name, "Brand New Absorbed Type");
+        assert_eq!(added.seen_in, 0, "known, but nothing has drawn it yet");
+        assert!(added.seen_paths.is_empty());
     }
 
     #[test]

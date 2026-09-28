@@ -64,8 +64,9 @@ impl Section {
                 "adding, arranging and checking are ex-commands: :add opens the palette",
                 "(or :add <kind> skips it), :idiom stamps a worked shape, :layout arranges",
                 "everything by layer or by flow, :kind sets what sort of diagram this is,",
-                ":lint lists what the rules refuse. :help is the manual. :debug opens a",
-                "panel of the app's state — the mode, the cursor, what the last keys did.",
+                ":lint lists what the rules refuse — so does gl, or a click on the header's",
+                "⚠ badge. :help is the manual. :debug opens a panel of the app's state — the",
+                "mode, the cursor, what the last keys did.",
             ],
             Section::Tab => &[
                 "each tab is a diagram of its own — FREEFORM (plain shapes, a whiteboard)",
@@ -185,6 +186,9 @@ pub struct Where {
     /// connection in it that is not on this diagram yet — `e` (expand) is the only thing
     /// that reads this.
     pub can_expand: bool,
+    /// How many relations the rules refuse — the header's own `⚠` count. `gl` reads this;
+    /// with nothing refused there is nothing to open.
+    pub problems: usize,
 }
 
 impl Where {
@@ -421,7 +425,7 @@ pub static COMMANDS: &[Cmd] = &[
         short: "",
         what: |w| match w.mode {
             Mode::Visual => "wrap what you picked into a grouping — a box around them, named",
-            _ => "prefix: gg first, gd follows a relation, gp up to the grouping, gu dissolves one, gt the next tab",
+            _ => "prefix: gg first, gd follows a relation, gp up to the grouping, gu dissolves one, gt the next tab, gl lists what the rules refuse",
         },
         section: Section::Edit,
         on: &[Stroke::k('g')],
@@ -459,6 +463,18 @@ pub static COMMANDS: &[Cmd] = &[
         run: &[Stroke::k('g'), Stroke::k('u')],
         menu: true,
         title: "Ungroup",
+    },
+    Cmd {
+        keys: "gl",
+        short: "",
+        what: |_| "the ⚠ badge's own list — every relation the rules refuse, word-wrapped; enter or a click jumps to it",
+        section: Section::Diagram,
+        on: &[Stroke::k('l')],
+        prefix: Some(Prefix::G),
+        avail: |w| need(w.normal() && w.problems > 0, "nothing the rules refuse"),
+        run: &[Stroke::k('g'), Stroke::k('l')],
+        menu: true,
+        title: "Lint List",
     },
     Cmd {
         keys: "a",
@@ -628,12 +644,24 @@ pub static COMMANDS: &[Cmd] = &[
     Cmd {
         keys: "zv",
         short: "",
-        what: |_| "pan freely: hjkl move the view, HJKL half a screen, esc comes back — the cursor stays",
+        what: |_| "pan freely: hjkl move the view, HJKL half a screen, ^d/^u a full one, esc comes back — the cursor stays",
         section: Section::Move,
         on: &[Stroke::k('v')],
         prefix: Some(Prefix::Zz),
         avail: |w| need(w.normal(), ONLY_NORMAL),
         run: &[Stroke::k('z'), Stroke::k('v')],
+        menu: false,
+        title: "",
+    },
+    Cmd {
+        keys: "^d ^u",
+        short: "",
+        what: |_| "pan the view a full screen down / up",
+        section: Section::Move,
+        on: &[Stroke::ctrl('d'), Stroke::ctrl('u')],
+        prefix: None,
+        avail: |w| need(w.mode == Mode::View, "pan freely first — zv"),
+        run: &[],
         menu: false,
         title: "",
     },
@@ -688,7 +716,7 @@ pub static COMMANDS: &[Cmd] = &[
         section: Section::Relate,
         on: &[Stroke::k('e')],
         prefix: None,
-        avail: |w| need(w.normal() && w.on_body() && w.can_expand, "not an ontology element with anything left to expand"),
+        avail: |w| need(w.normal() && w.on_body() && w.can_expand, "no ontology or registry connections left to add — o relates it directly instead"),
         run: &[Stroke::k('e')],
         menu: true,
         title: "Expand",
@@ -1270,6 +1298,7 @@ pub(crate) fn sample_wheres() -> Vec<Where> {
         plain_keys: false,
         in_group: false,
         can_expand: false,
+        problems: 0,
     };
     let body = Spot { focus: Focus::Body, composite: false, relations: 0, refused: false, bend_across: None };
     let rel = Spot { focus: Focus::Relation, composite: false, relations: 2, refused: false, bend_across: Some(true) };

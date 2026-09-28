@@ -79,20 +79,23 @@ pub enum Layer {
 }
 
 impl Layer {
-    /// The fill architects already read a layer in — the pastel every desktop tool uses —
-    /// for a shape whose fill is `auto`. A composite is a boundary and has none; a plain
-    /// shape is paper.
+    /// The fill a layer wears when a shape's fill is `auto` — each one this palette's own
+    /// accent (`PAINTS_LIGHT`, the same hue `theme::LIGHT.layers` outlines it in) washed
+    /// three parts toward paper. Not the saturated primaries a desktop ArchiMate tool
+    /// reaches for: those are a different app's colours, and a diagram drawn in them reads
+    /// as imported rather than as this one's own. A composite is a boundary and has none; a
+    /// plain shape is paper.
     pub fn pastel(self) -> Option<[u8; 3]> {
         match self {
-            Layer::Motivation => Some([204, 204, 255]),
-            Layer::Strategy => Some([245, 222, 170]),
-            Layer::Business => Some([255, 255, 181]),
-            Layer::Application => Some([181, 255, 255]),
-            Layer::Technology => Some([201, 231, 183]),
-            Layer::Implementation => Some([255, 224, 224]),
-            Layer::Ontology => Some([226, 238, 250]),
-            Layer::CommonCore => Some([210, 232, 226]),
-            Layer::UpperOntology => Some([223, 223, 223]),
+            Layer::Motivation => Some([227, 207, 220]),
+            Layer::Strategy => Some([237, 221, 196]),
+            Layer::Business => Some([235, 206, 192]),
+            Layer::Application => Some([208, 222, 213]),
+            Layer::Technology => Some([222, 220, 195]),
+            Layer::Implementation => Some([242, 200, 199]),
+            Layer::Ontology => Some([193, 217, 221]),
+            Layer::CommonCore => Some([203, 226, 221]),
+            Layer::UpperOntology => Some([214, 214, 214]),
             Layer::Composite => None,
             Layer::Sketch => Some([255, 255, 255]),
         }
@@ -1004,38 +1007,27 @@ impl ShapeKind {
     }
 
     /// The size a fresh element is placed at, in cells. Groupings are big because they are
-    /// meant to have things inside them.
+    /// meant to have things inside them. Every other real shape here — a plain box, a use-case
+    /// oval, a decision diamond, an ArchiMate kind, a brainstormed note — ends up carrying
+    /// whatever real sentence someone actually typed, not a placeholder like "box" or
+    /// "circle", so the catch-all is sized for a real label's two wrapped lines, not its tag.
+    /// Only the handful below are kept small on purpose: a start/end terminal, a gateway with
+    /// no label of its own, an actor's stick figure, a bare text annotation — icons, read at a
+    /// glance, not boxes a sentence goes in.
     pub fn default_size(self) -> (f64, f64) {
         match self {
             Grouping | Location => (30.0, 12.0),
-            ObjectType | Interface => (22.0, 6.0),
-            ActionType => (20.0, 5.0),
-            SharedProperty | ValueType => (16.0, 4.0),
-            Datasource => (14.0, 5.0),
+            ObjectType | Interface => (24.0, 7.0),
+            ActionType => (22.0, 6.0),
+            SharedProperty | ValueType => (18.0, 5.0),
+            Datasource => (16.0, 5.0),
             ObjectTypeGroup => (36.0, 14.0),
             Circle => (12.0, 6.0),
-            Cloud => (16.0, 7.0),
             Text => (14.0, 3.0),
-            Square => (10.0, 5.0),
-            Ellipse => (18.0, 6.0),
-            Triangle => (14.0, 6.0),
-            PredefinedProcess => (18.0, 5.0),
-            Document => (16.0, 6.0),
-            InternalStorage => (16.0, 6.0),
-            Cube => (16.0, 6.0),
-            Tape => (16.0, 6.0),
-            Note => (16.0, 6.0),
-            Callout => (16.0, 6.0),
             StickFigure => (10.0, 6.0),
             OffPage => (12.0, 5.0),
-            DoubleArrow => (18.0, 5.0),
-            And => (12.0, 5.0),
-            Or => (12.0, 5.0),
-
-            CommunicationNetwork => (16.0, 6.0),
-            DataObject => (12.0, 6.0),
-            BusinessEvent | ApplicationEvent | ImplementationEvent => (14.0, 5.0),
-            _ => (16.0, 5.0),
+            And | Or => (12.0, 5.0),
+            _ => (20.0, 6.0),
         }
     }
 

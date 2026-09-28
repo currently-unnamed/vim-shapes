@@ -15,10 +15,15 @@ use crate::ontology::{mix, Colour, End, LineStyle, Paint, Shape};
 use crate::shapes::{self, CurvePrimitive, Point};
 use crate::ui::canvas;
 
-const INK: [u8; 3] = [0, 0, 0];
-const PAPER: [u8; 3] = [255, 255, 255];
-const GRID_MINOR: [u8; 3] = [232, 232, 232];
-const GRID_MAJOR: [u8; 3] = [208, 208, 208];
+// Warm gruvbox tones, not a desktop tool's pure black on stark white: this is the picture
+// `V` and the clean export show, and it should read as this app's own, not as a copy of
+// draw.io's or Archi's defaults. INK is `theme::LIGHT.ink`; PAPER a calmer, warmed white
+// (white mixed a third of the way toward the app's own cream ground); the grid lines are
+// INK mixed most of the way back toward PAPER, so they stay part of the same palette.
+const INK: [u8; 3] = [60, 56, 54];
+const PAPER: [u8; 3] = [254, 251, 238];
+const GRID_MINOR: [u8; 3] = [231, 228, 216];
+const GRID_MAJOR: [u8; 3] = [206, 202, 192];
 
 fn paint_rgb(c: Colour, light: bool) -> [u8; 3] {
     c.on(light)
@@ -34,9 +39,47 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
     let dark = o.appearance == Appearance::Dark;
     let ink = if dark { [235, 219, 178] } else { INK };
     let paper = if dark { [29, 32, 33] } else { PAPER };
+    // The kind tag's own tier: `theme::DARK.dim` / `LIGHT.dim`, not a bare neutral grey —
+    // but mixed half way to the ink, because here it sits on the shape's own pastel fill,
+    // not the paper `dim` was tuned to read on: plain `dim` drops as low as 3.2:1 against
+    // the deepest fills (`Layer::pastel`'s implementation salmon), well under the 4.5:1 a
+    // small label needs; the half-mix clears every layer's own wash with room to spare while
+    // staying a visible step lighter than the label it sits above.
+    let dim = if dark { mix([146, 131, 116], ink, 0.5) } else { mix([124, 111, 100], ink, 0.5) };
     let page = &doc.metadata.page;
     let ground = page.background.map(|c| c.on(!dark)).unwrap_or(paper);
     let mut items = Vec::new();
+
+    // Real glyph widths, not a monospace guess. `canvas::label_lines` centres and
+    // right-sets a line by counting characters — exact for the terminal's own fixed-width
+    // cell, but this picture sets its labels in a proportional sans, where an "i" and an "M"
+    // advance by different amounts. Measuring here, once per distinct face and cached by it,
+    // keeps a centred or right-set line lined up with the box it was measured against
+    // instead of the cell grid `label_lines` wrapped it to.
+    let sans_face = SANS.iter().find_map(|f| load(f));
+    let mut faces: Vec<((String, bool, bool), Option<fontdue::Font>)> = Vec::new();
+    let mut measure = |text: &str, font: &Option<String>, bold: bool, italic: bool, size: f64| -> f64 {
+        let face = font.as_ref().and_then(|name| {
+            let key = (name.clone(), bold, italic);
+            if !faces.iter().any(|(k, _)| *k == key) {
+                faces.push((key.clone(), crate::fonts::face_of(&key.0, bold, italic).and_then(|p| load(&p.to_string_lossy()))));
+            }
+            faces.iter().find(|(k, _)| *k == key).and_then(|(_, f)| f.as_ref())
+        });
+        let Some(f) = face.or(sans_face.as_ref()) else { return text.chars().count() as f64 * size * 0.55 };
+        text.chars().map(|ch| f.metrics(ch, size as f32).advance_width as f64).sum()
+    };
+    // Where a line of real pixel width `tw` starts, for the element's own alignment — the
+    // same left, right and centre edges `label_lines` places its cell-count guess against.
+    let aligned_x = |e: &crate::model::Element, tw: f64| -> f64 {
+        let cellw = CELL_W * s;
+        let pad = e.text.padding as f64 * cellw;
+        match e.text.align {
+            crate::model::Align::Left => px(e.x) + cellw + pad,
+            crate::model::Align::Right => (px(e.right()) - cellw - pad - tw).max(px(e.x) + cellw),
+            crate::model::Align::Centre => px(e.x + e.w / 2.0) - tw / 2.0,
+        }
+    };
 
     // The grid, at the diagram's own density: ruled, a line every quarter of a grid step
     // and a heavier one at the step, the way graph paper is; or a dot at each step, the way
@@ -184,10 +227,11 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
                     items.push(Item::Polyline { pts: run, color, width, dash: dash_of(e.drawn_line(), width) });
                 }
             }
-            for (x, y, line) in canvas::label_lines(e, &e.label) {
+            for (_x, y, line) in canvas::label_lines(e, &e.label) {
                 let size = e.text.size.map(|n| n as f64 * s * 0.8).unwrap_or(15.0 * s);
                 let t = &e.text;
-                items.push(Item::Text { x: px(x), y: py(y), text: line, color: t.color.map(|c| c.on(!dark)).unwrap_or(ink), font: t.font.clone(), size, bold: t.bold, italic: t.italic, underline: t.underline, band: t.band.then_some(paper) });
+                let tw = measure(&line, &t.font, t.bold, t.italic, size);
+                items.push(Item::Text { x: aligned_x(e, tw), y: py(y), text: line, color: t.color.map(|c| c.on(!dark)).unwrap_or(ink), font: t.font.clone(), size, bold: t.bold, italic: t.italic, underline: t.underline, band: t.band.then_some(paper) });
             }
             continue;
         }
@@ -204,7 +248,7 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
         // Labels: sans-serif, centred as on screen, the kind's tag small in the corner.
         let size = e.text.size.map(|n| n as f64 * s * 0.8).unwrap_or(15.0 * s);
         if composite {
-            items.push(Item::Text { x: px(e.x + 2.0), y: py(e.y) + 2.0 * s, text: e.kind.short().into(), color: [120, 120, 120], font: None, size: 12.0 * s, bold: false, italic: false, underline: false, band: None });
+            items.push(Item::Text { x: px(e.x + 2.0), y: py(e.y) + 2.0 * s, text: e.kind.short().into(), color: dim, font: None, size: 12.0 * s, bold: false, italic: false, underline: false, band: None });
             if !e.label.is_empty() {
                 items.push(Item::Text { x: px(e.x + 2.0), y: py(e.y + 1.0) + 2.0 * s, text: e.label.clone(), color: ink, font: e.text.font.clone(), size, bold: true, italic: false, underline: false, band: None });
             }
@@ -214,20 +258,23 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
         // corner would leave it hanging outside the curve.
         if !e.kind.is_sketch() && e.h >= 4.0 {
             let size = 11.0 * s;
+            let short = e.kind.short();
             let tag = e.tag_marked(true);
-            let w = tag.chars().count() as f64 * size * 0.55;
+            let w = measure(&tag, &None, false, false, size);
             let x = px(e.x + e.w / 2.0) - w / 2.0;
-            items.push(Item::Text { x, y: py(e.y) + 4.0 * s, text: e.kind.short().into(), color: [120, 120, 120], font: None, size, bold: false, italic: false, underline: false, band: None });
+            items.push(Item::Text { x, y: py(e.y) + 4.0 * s, text: short.into(), color: dim, font: None, size, bold: false, italic: false, underline: false, band: None });
             // Paper's mark is a letter, since a sans face may have no ✗ — red all the same.
             if let Some(m) = e.status.mark(true) {
-                let x = x + (e.kind.short().chars().count() + 1) as f64 * size * 0.55;
+                let x = x + measure(short, &None, false, false, size);
                 items.push(Item::Text { x, y: py(e.y) + 4.0 * s, text: m.into(), color: paint_rgb(Paint::Red.into(), !dark), font: None, size, bold: true, italic: false, underline: false, band: None });
             }
         }
         let t = &e.text;
         let text_ink = t.color.map(|c| c.on(!dark)).unwrap_or(ink);
-        for (x, y, line) in canvas::label_lines(e, &e.label) {
-            items.push(Item::Text { x: px(x), y: py(y), text: line, color: text_ink, font: t.font.clone(), size, bold: t.bold || e.has_rows(), italic: t.italic, underline: t.underline, band: t.band.then_some(paper) });
+        let bold = t.bold || e.has_rows();
+        for (_x, y, line) in canvas::label_lines(e, &e.label) {
+            let tw = measure(&line, &t.font, bold, t.italic, size);
+            items.push(Item::Text { x: aligned_x(e, tw), y: py(y), text: line, color: text_ink, font: t.font.clone(), size, bold, italic: t.italic, underline: t.underline, band: t.band.then_some(paper) });
         }
         // The compartment: a rule under the header, a row per property in a smaller sans,
         // the type set against the right edge the way a class diagram does it.
@@ -241,13 +288,13 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
                 let (x, head) = match head.strip_prefix(gone).filter(|_| e.properties.get(i).is_some_and(|p| p.mark(true).trim() == gone)) {
                     Some(rest) => {
                         items.push(Item::Text { x: px(x), y: py(y) + 2.0 * s, text: gone.into(), color: paint_rgb(Paint::Red.into(), !dark), font: None, size: row_size, bold: true, italic: false, underline: false, band: None });
-                        (px(x) + (gone.chars().count() as f64) * row_size * 0.55, rest.to_string())
+                        (px(x) + measure(gone, &None, true, false, row_size), rest.to_string())
                     }
                     None => (px(x), head),
                 };
                 items.push(Item::Text { x, y: py(y) + 2.0 * s, text: head, color: ink, font: None, size: row_size, bold: false, italic: false, underline: false, band: None });
-                let tw = ty.chars().count() as f64 * row_size * 0.55;
-                items.push(Item::Text { x: px(e.right() - 2.0) - tw, y: py(y) + 2.0 * s, text: ty, color: [120, 120, 120], font: None, size: row_size, bold: false, italic: false, underline: false, band: None });
+                let tw = measure(&ty, &None, false, false, row_size);
+                items.push(Item::Text { x: px(e.right() - 2.0) - tw, y: py(y) + 2.0 * s, text: ty, color: dim, font: None, size: row_size, bold: false, italic: false, underline: false, band: None });
             }
         }
     }
@@ -289,7 +336,7 @@ pub fn picture(doc: &Document, o: &Options) -> Picture {
                 let (cx, cy) = (px(cx), py(cy));
                 let t = &r.text;
                 let size = t.size.map_or(13.0 * s, |n| n as f64 * s * 0.8);
-                let w = text.chars().count() as f64 * size * 0.55;
+                let w = measure(text, &t.font, t.bold, t.italic, size);
                 items.push(Item::Text { x: cx - w / 2.0, y: cy - 10.0 * s, text: text.to_string(), color: t.color.map(|c| c.on(!dark)).unwrap_or(color), font: t.font.clone(), size, bold: t.bold, italic: t.italic, underline: false, band: t.band.then_some(paper) });
             }
         }
@@ -663,8 +710,8 @@ mod tests {
         d.element_mut(c).unwrap().opacity = 50;
         let p = picture(&d, &o);
         let fills: Vec<[u8; 3]> = p.items.iter().filter_map(|i| match i { Item::Polygon { fill, stroke: None, pts } if pts.len() == 4 => Some(*fill), _ => None }).collect();
-        assert!(fills.contains(&[181, 255, 255]), "auto on an application shape is its pastel: {fills:?}");
-        assert!(fills.contains(&[128, 128, 228]), "a blue at half opacity is half way to paper: {fills:?}");
+        assert!(fills.contains(&[208, 222, 213]), "auto on an application shape is its pastel: {fills:?}");
+        assert!(fills.contains(&[127, 126, 219]), "a blue at half opacity is half way to paper: {fills:?}");
         assert_eq!(fills.len(), 2, "the fill-less box has no polygon");
         let dotted = p.items.iter().filter(|i| matches!(i, Item::Polyline { dash: Some((on, _)), .. } if *on < 2.0)).count();
         assert_eq!(dotted, 4, "the dotted box's four edges");
@@ -889,7 +936,7 @@ mod tests {
         };
         pair("straight", 2.0, Route::Straight, None, EndSize::Normal);
         pair("orthogonal", 20.0, Route::Orthogonal, None, EndSize::Small);
-        pair("elbow at 8", 38.0, Route::Orthogonal, Some(8), EndSize::Large);
+        pair("elbow at 8%", 38.0, Route::Orthogonal, Some(8), EndSize::Large);
         pair("curved", 56.0, Route::Curved, None, EndSize::Normal);
         let o = Options { style: crate::export::Style::Clean, appearance: Appearance::Light, grid: true, zoom: 150, ..Options::default() };
         let out = std::env::var("EYEBALL_DIR").unwrap_or_else(|_| std::env::temp_dir().display().to_string());

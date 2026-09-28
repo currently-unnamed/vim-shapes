@@ -73,7 +73,7 @@ pub fn scan(root: &Path) -> Vec<Node> {
 /// A name typed for a new folder, a new diagram, or a rename, made safe as a single path
 /// segment — a `/` in a typed name would otherwise silently reach outside the folder it was
 /// typed into.
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
     name.trim().chars().map(|c| if matches!(c, '/' | '\\' | '\0') { '-' } else { c }).collect()
 }
 

@@ -66,10 +66,14 @@ impl Default for Workspace {
 
 /// The file format. Bumped when a saved file would no longer open the way it was saved.
 ///
-/// 2: the first ontology-typed format — elements have an `ShapeKind`, relations a
-///    `RelationKind`, and the document a `View`. (1 was a sketch with bare shapes and is not
-///    read: nothing was ever saved in it outside this repository.)
-pub const CURRENT_VERSION: u32 = 2;
+/// 3: a relation's `elbow` is per cent of its first leg, not cells from the tail, so a bend
+///    stays proportionally put as the two shapes move apart — `persistence::load` converts an
+///    older file's cell count once, using the geometry the file itself still describes, so
+///    nothing bent by hand moves the moment it is opened. (2 was the first ontology-typed
+///    format — elements have a `ShapeKind`, relations a `RelationKind`, and the document a
+///    `View`; 1 was a sketch with bare shapes and is not read, since nothing was ever saved in
+///    it outside this repository.)
+pub const CURRENT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Document {
@@ -211,6 +215,16 @@ impl Page {
 
 fn is_true(b: &bool) -> bool {
     *b
+}
+
+/// A free key/value pair carried through from wherever an element or relation was imported —
+/// Archi's own "Properties" tab, say. Distinct from [`Property`]: that is this app's own
+/// domain-modelling concept, a field definition on an object type, and reusing it for arbitrary
+/// source metadata would give one name two meanings. This app never writes a `Tag` itself.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Tag {
+    pub key: String,
+    pub value: String,
 }
 
 /// One row of an ontology type: a property of an object type or interface, or a parameter of
@@ -889,6 +903,13 @@ pub struct Element {
     /// on it, and it can still be related to.
     #[serde(default, skip_serializing_if = "is_false")]
     pub locked: bool,
+    /// Free text from the source this was imported from — Archi's own "Documentation" field,
+    /// say. This app never writes one itself; only an import can set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    /// Arbitrary key/value tags from the source. See [`Tag`] for why this is not `properties`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Tag>,
 }
 
 fn one() -> u8 {
@@ -1232,12 +1253,16 @@ impl Element {
     /// `gap` further out along the same ray from the centre, so hovering a shape can offer
     /// "add a connected shape this way" without the arrow's own hit-zone overlapping the
     /// handle's (a handle resizes; an arrow, `gap` further out, opens a new one instead).
+    /// The push is worked out in the space where a cell reads square — [`crate::shapes::ASPECT`]
+    /// corrects it back — or a `gap` that looks right pushed sideways lands twice as far
+    /// pushed up or down, exactly the "tight on the sides, loose top and bottom" a cell
+    /// twice as tall as wide would otherwise draw.
     pub fn arrows(&self, gap: f64) -> [(f64, f64); 8] {
         let (cx, cy) = self.center();
         self.handles().map(|(hx, hy)| {
-            let (dx, dy) = (hx - cx, hy - cy);
+            let (dx, dy) = (hx - cx, (hy - cy) * crate::shapes::ASPECT);
             let len = dx.hypot(dy);
-            if len == 0.0 { (hx, hy) } else { (hx + dx / len * gap, hy + dy / len * gap) }
+            if len == 0.0 { (hx, hy) } else { (hx + dx / len * gap, hy + dy / len * gap / crate::shapes::ASPECT) }
         })
     }
 
@@ -1247,10 +1272,14 @@ impl Element {
     /// one arrow's reach and the next; a handle approached from an angle a circle's radius
     /// doesn't cover would lose hover before the mouse ever got there. Edges extended
     /// outward have no such gap: every point in the margin is in exactly one region, however
-    /// it was reached, so an arrow can never go cold on the way to it.
+    /// it was reached, so an arrow can never go cold on the way to it. `margin` is a visual
+    /// reach, the same one `arrows()`'s own `gap` is — vertically that is half as many cells,
+    /// or the invisible gutter would reach twice as far above and below as it does to each
+    /// side, the same mismatch [`Element::arrows`] corrects for the glyph itself.
     pub fn arrow_region(&self, (px, py): (f64, f64), margin: f64) -> Option<usize> {
         let (x, y, r, b) = (self.x, self.y, self.right(), self.bottom());
-        if px < x - margin || px > r + margin || py < y - margin || py > b + margin {
+        let vmargin = margin / crate::shapes::ASPECT;
+        if px < x - margin || px > r + margin || py < y - vmargin || py > b + vmargin {
             return None;
         }
         let col = if px < x { 0 } else if px > r { 2 } else { 1 };
@@ -1317,10 +1346,18 @@ pub struct Relation {
     /// half way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_at: Option<u8>,
-    /// Where an orthogonal route turns: cells from the tail along its first leg; blank is
-    /// half way.
+    /// Where an orthogonal route turns: per cent of the way along its first leg, from the
+    /// tail; blank is half way. Kept as a fraction of the leg rather than a cell count so a
+    /// bend stays proportionally where it was put as the two shapes move — a version-2
+    /// file's own cell count is converted once, on load, by `Document::migrate_legacy_elbows`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elbow: Option<i64>,
+    /// Free text from the source this was imported from — this app never writes one itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    /// Arbitrary key/value tags from the source. See [`Tag`] for why this is not `properties`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Tag>,
 }
 
 impl Relation {
@@ -1438,7 +1475,62 @@ impl Document {
     /// corners of an orthogonal one, a sampled curve. Every surface draws from this.
     pub fn route(&self, r: &Relation) -> Option<Vec<(f64, f64)>> {
         let (p1, p2) = self.end_points(r)?;
-        Some(crate::shapes::route_from(p1, p2, r.notation().route, r.elbow, Some(self.leaves_across(r, p1, p2))))
+        let across = self.leaves_across(r, p1, p2);
+        let notation = r.notation();
+        // An elbow the person set by hand (`:bend`, or dragging it) is theirs to keep — this
+        // only picks one for them, the way `leaves_across`'s own guess is only a default too.
+        let elbow = if r.elbow.is_none() && notation.route == ontology::Route::Orthogonal { self.clear_elbow(r, p1, p2, across) } else { r.elbow };
+        Some(crate::shapes::route_from(p1, p2, notation.route, elbow, Some(across)))
+    }
+
+    /// Every element an orthogonal route's own legs must not cut through: not the relation's
+    /// two ends, not a grouping or location — open by design, what is inside it has to stay
+    /// visible — and not a plain label, which has no boundary of its own to speak of.
+    fn route_obstacles(&self, r: &Relation) -> Vec<(f64, f64, f64, f64)> {
+        self.elements
+            .iter()
+            .filter(|e| e.id != r.from && e.id != r.to && self.element_visible(e.id) && !e.kind.is_composite() && e.kind.shape() != ontology::Shape::Text)
+            .map(|e| (e.x, e.y, e.w, e.h))
+            .collect()
+    }
+
+    /// A little clearance so a route reads as going around a shape, not just grazing its
+    /// edge — the same spirit as the gutter a fresh element is placed with.
+    const ROUTE_CLEARANCE: f64 = 0.5;
+
+    /// The elbow an *automatic* orthogonal route picks for itself: the plain midpoint if
+    /// nothing sits in the way, or, if something does, the nearest one on either side that
+    /// clears every obstacle — the least surprising bend that still doesn't cut through a
+    /// third shape's own boundary. `None` (the midpoint) if nothing is in the way, or if
+    /// nothing else clears every obstacle either — a route some shape simply cannot dodge is
+    /// better drawn straight through, honestly, than nudged into an arbitrary-looking bend
+    /// that fixes nothing. Searched in whole per cent points, the same unit a hand-set
+    /// `elbow` is now kept in, so this never picks a value the person couldn't have dragged
+    /// to themselves.
+    fn clear_elbow(&self, r: &Relation, p1: (f64, f64), p2: (f64, f64), across: bool) -> Option<i64> {
+        let obstacles: Vec<(f64, f64, f64, f64)> = self
+            .route_obstacles(r)
+            .into_iter()
+            .map(|(x, y, w, h)| (x - Self::ROUTE_CLEARANCE, y - Self::ROUTE_CLEARANCE, w + 2.0 * Self::ROUTE_CLEARANCE, h + 2.0 * Self::ROUTE_CLEARANCE))
+            .collect();
+        if obstacles.is_empty() {
+            return None;
+        }
+        let clear = |elbow: Option<i64>| {
+            let pts = crate::shapes::route_from(p1, p2, ontology::Route::Orthogonal, elbow, Some(across));
+            !obstacles.iter().any(|&rect| crate::shapes::route_crosses(&pts, rect))
+        };
+        if clear(None) {
+            return None;
+        }
+        for step in 1..=50 {
+            for cand in [50 + step, 50 - step] {
+                if (0..=100).contains(&cand) && clear(Some(cand)) {
+                    return Some(cand);
+                }
+            }
+        }
+        None
     }
 
     /// Which way an orthogonal route leaves its tail — across, from a side, or down, from a
@@ -1471,10 +1563,12 @@ impl Document {
         Some(self.leaves_across(r, p1, p2))
     }
 
-    /// Slide an orthogonal relation's one turn by `n` cells — always in the screen direction
-    /// `bend`'s caller means (positive right or down), regardless of which of the two
-    /// elements happens to be `from`: `elbow` itself is a distance along the first leg, not a
-    /// screen coordinate, so the sign it needs depends on which way that leg actually points.
+    /// Slide an orthogonal relation's one turn by `n` percentage points of its own leg —
+    /// always in the screen direction `bend`'s caller means (positive right or down),
+    /// regardless of which of the two elements happens to be `from`: `elbow` itself is a
+    /// fraction along the first leg, not a screen coordinate, so the sign it needs depends on
+    /// which way that leg actually points. Clamped to the leg itself — pulling past either
+    /// end would turn before the tail or after the head, a point the leg doesn't have.
     pub fn bend(&mut self, rid: RelationId, n: f64) {
         let Some(r) = self.relation(rid) else { return };
         let Some((p1, p2)) = self.end_points(r) else { return };
@@ -1486,8 +1580,38 @@ impl Document {
         let span = if across { dx } else { dy };
         let sign = if span == 0.0 { 1.0 } else { span.signum() };
         let Some(r) = self.relation_mut(rid) else { return };
-        let base = r.elbow.unwrap_or_else(|| (span / 2.0).round() as i64);
-        r.elbow = Some(base + (n * sign).round() as i64);
+        let base = r.elbow.unwrap_or(50);
+        r.elbow = Some((base + (n * sign).round() as i64).clamp(0, 100));
+    }
+
+    /// A version-2 file's own `elbow` was cells from the tail; read into this version, that
+    /// number is a per-cent one, so a bend inherited from an old file would land somewhere
+    /// else on the very first draw. Converts every relation that had one, using the geometry
+    /// the file itself still describes at the moment it opens, and marks the diagram current
+    /// so a re-save never runs this twice. Called once, right after `persistence::load`
+    /// deserializes an older file.
+    pub(crate) fn migrate_legacy_elbows(&mut self) {
+        if self.version >= CURRENT_VERSION {
+            return;
+        }
+        let converted: Vec<(RelationId, i64)> = self
+            .relations
+            .iter()
+            .filter_map(|r| {
+                let cells = r.elbow?;
+                let (p1, p2) = self.end_points(r)?;
+                let across = self.leaves_across(r, p1, p2);
+                let span = if across { p2.0 - p1.0 } else { p2.1 - p1.1 };
+                let pct = if span.abs() < f64::EPSILON { 50 } else { ((cells as f64 / span.abs()) * 100.0).round().clamp(0.0, 100.0) as i64 };
+                Some((r.id, pct))
+            })
+            .collect();
+        for (id, pct) in converted {
+            if let Some(r) = self.relation_mut(id) {
+                r.elbow = Some(pct);
+            }
+        }
+        self.version = CURRENT_VERSION;
     }
 
     pub fn add(&mut self, kind: ShapeKind, label: impl Into<String>, x: f64, y: f64) -> ElementId {
@@ -1522,6 +1646,8 @@ impl Document {
             stroke: 1,
             layer,
             locked: false,
+            documentation: None,
+            tags: Vec::new(),
         });
         id
     }
@@ -1564,7 +1690,7 @@ impl Document {
         }
         let id = self.alloc_relation_id();
         let layer = self.metadata.layer;
-        self.relations.push(Relation { id, kind, from, to, label: None, tail_label: None, head_label: None, style: None, from_port: None, to_port: None, layer, locked: false, offsets: [(0.0, 0.0); 3], text: TextStyle::default(), label_at: None, elbow: None });
+        self.relations.push(Relation { id, kind, from, to, label: None, tail_label: None, head_label: None, style: None, from_port: None, to_port: None, layer, locked: false, offsets: [(0.0, 0.0); 3], text: TextStyle::default(), label_at: None, elbow: None, documentation: None, tags: Vec::new() });
         Ok(id)
     }
 
@@ -1717,6 +1843,16 @@ impl Document {
             .rev()
             .find(|e| self.element_visible(e.id) && (e.contains(p) || e.arrow_region(p, arrow_margin).is_some()))
             .map(|e| e.id)
+    }
+
+    /// The frontmost visible element with a handle within `tol` of a point — a handle sits
+    /// exactly on its box's border, so half its own hit-circle falls outside `contains`; a
+    /// lookup gated on being inside the box first (as `element_at` is) would silently throw
+    /// that outward half away; a click a hair short of the border would then fall through to
+    /// the arrow gutter, not the handle it looks like it landed on. This asks each element's
+    /// own `handle_at` instead of the point-in-box question `element_at` asks.
+    pub fn element_for_handle(&self, p: (f64, f64), tol: f64) -> Option<(ElementId, usize)> {
+        self.elements_in_order().into_iter().rev().filter(|e| self.element_visible(e.id)).find_map(|e| e.handle_at(p, tol).map(|h| (e.id, h)))
     }
 
     /// The relation whose route passes within `tol` cells of a point, if any — the nearest
@@ -2050,36 +2186,62 @@ mod tests {
     }
 
     #[test]
+    fn every_hover_arrow_sits_the_same_visual_distance_from_its_own_handle() {
+        let mut doc = Document::default();
+        let a = doc.add(Box, "", 0.0, 0.0);
+        let e = doc.element(a).unwrap().clone();
+        let (handles, arrows) = (e.handles(), e.arrows(2.0));
+        for i in 0..8 {
+            let (hx, hy) = handles[i];
+            let (ax, ay) = arrows[i];
+            // A cell reads twice as tall as it is wide, so the y difference is doubled
+            // before measuring — the same correction `arrows()` itself makes, without
+            // which top and bottom would land twice as far out as the sides did.
+            let visual = ((ax - hx).powi(2) + ((ay - hy) * crate::shapes::ASPECT).powi(2)).sqrt();
+            assert!((visual - 2.0).abs() < 0.001, "handle {i}: pushed {visual} visual units, wanted 2.0");
+        }
+    }
+
+    #[test]
     fn arrow_region_covers_the_whole_gutter_with_no_gap_between_directions() {
         let mut doc = Document::default();
         let a = doc.add(Box, "", 10.0, 10.0);
         let e = doc.element(a).unwrap().clone();
-        assert_eq!(e.arrow_region(e.center(), 3.0), None, "inside the box is nobody's arrow");
-        assert_eq!(e.arrow_region((e.x, e.y), 3.0), None, "the border itself is still the box, not the gutter");
+        let margin = 3.0;
+        let vmargin = margin / crate::shapes::ASPECT;
+        assert_eq!(e.arrow_region(e.center(), margin), None, "inside the box is nobody's arrow");
+        assert_eq!(e.arrow_region((e.x, e.y), margin), None, "the border itself is still the box, not the gutter");
         // Every point on a straight walk outward, in each of the eight directions, lands in
-        // that direction's own region the whole way out to the margin — the bug this guards
+        // that direction's own region the whole way to the margin — the bug this guards
         // against: a circle around each arrow's own drawn point left gaps a vertical or
         // diagonal approach could fall through, going cold before the mouse ever arrived.
+        // The margin itself reads as a visual reach, not a cell count: half as many cells
+        // up or down as side to side, so a diagonal ray leaves through whichever axis is
+        // narrower first.
         let mid = ((e.x + e.right()) / 2.0, (e.y + e.bottom()) / 2.0);
-        let rays: [((f64, f64), usize); 8] = [
-            ((e.x, e.y), 0),       // NW
-            ((mid.0, e.y), 1),     // N
-            ((e.right(), e.y), 2), // NE
-            ((e.right(), mid.1), 3), // E
-            ((e.right(), e.bottom()), 4), // SE
-            ((mid.0, e.bottom()), 5), // S
-            ((e.x, e.bottom()), 6), // SW
-            ((e.x, mid.1), 7),     // W
+        let rays: [((f64, f64), (f64, f64), usize); 8] = [
+            ((e.x, e.y), (-1.0, -1.0), 0),             // NW
+            ((mid.0, e.y), (0.0, -1.0), 1),            // N
+            ((e.right(), e.y), (1.0, -1.0), 2),        // NE
+            ((e.right(), mid.1), (1.0, 0.0), 3),       // E
+            ((e.right(), e.bottom()), (1.0, 1.0), 4),  // SE
+            ((mid.0, e.bottom()), (0.0, 1.0), 5),      // S
+            ((e.x, e.bottom()), (-1.0, 1.0), 6),       // SW
+            ((e.x, mid.1), (-1.0, 0.0), 7),            // W
         ];
-        for ((bx, by), dir) in rays {
-            let (dx, dy) = (bx - mid.0, by - mid.1);
-            let len = dx.hypot(dy);
-            let (ux, uy) = (dx / len, dy / len);
-            // Six steps out, well inside a 3-cell margin on either axis: every one of them
-            // must still land in `dir`'s own region, not fall through to `None`.
-            for k in 1..=6 {
-                let p = (mid.0 + ux * (len + k as f64 * 0.5), mid.1 + uy * (len + k as f64 * 0.5));
-                assert_eq!(e.arrow_region(p, 3.0), Some(dir), "direction {dir}, {k} steps out: {p:?}");
+        for ((bx, by), (ux, uy), dir) in rays {
+            // How far this ray can walk before it leaves the margin on whichever axis it
+            // moves in — both, for a diagonal, the narrower one winning.
+            let max_s = match (ux != 0.0, uy != 0.0) {
+                (true, true) => (margin / ux.abs()).min(vmargin / uy.abs()),
+                (true, false) => margin,
+                (false, true) => vmargin,
+                (false, false) => unreachable!(),
+            };
+            for frac in [0.2, 0.4, 0.6, 0.8, 0.98] {
+                let s = max_s * frac;
+                let p = (bx + ux * s, by + uy * s);
+                assert_eq!(e.arrow_region(p, margin), Some(dir), "direction {dir}, {frac} of the way to its own margin: {p:?}");
             }
         }
     }
@@ -2105,12 +2267,12 @@ mod tests {
         let r = doc.connect(RelationKind::Link, a, b).unwrap();
         let rel = doc.relation(r).unwrap().clone();
         let (p1, _) = doc.end_points(&rel).unwrap();
-        assert_eq!(p1, (16.0, 2.5), "unanchored: the right edge, facing b");
+        assert_eq!(p1, (20.0, 3.0), "unanchored: the right edge, facing b");
         assert_eq!(doc.port_on(&rel, a), Some(3), "…which is the right handle");
         assert_eq!(doc.at_port(a, 3), vec![r]);
         doc.relation_mut(r).unwrap().from_port = Some(1);
         let rel = doc.relation(r).unwrap().clone();
-        assert_eq!(doc.end_points(&rel).unwrap().0, (8.0, 0.0), "anchored: the top handle");
+        assert_eq!(doc.end_points(&rel).unwrap().0, (10.0, 0.0), "anchored: the top handle");
         assert_eq!(doc.at_port(a, 3), Vec::<RelationId>::new());
         assert_eq!(doc.at_port(a, 1), vec![r]);
     }
@@ -2123,12 +2285,16 @@ mod tests {
         let r = doc.connect(RelationKind::Link, a, b).unwrap();
         let rel = doc.relation(r).unwrap().clone();
         assert_eq!(doc.bendable(&rel), Some(true), "side to side: the pull is left/right");
+        let (p1, p2) = doc.end_points(&rel).unwrap();
+        let span = p2.0 - p1.0;
         doc.bend(r, 3.0);
+        assert_eq!(doc.relation(r).unwrap().elbow, Some(53), "half way (50) plus 3 percentage points, toward b");
         let pts = doc.route(doc.relation(r).unwrap()).unwrap();
-        assert_eq!((pts[1].0, pts[2].0), (31.0, 31.0), "half way (28) plus 3, toward b");
+        assert!((pts[1].0 - (p1.0 + span * 0.53)).abs() < 1e-9, "53% of the way along the leg: {pts:?}");
         doc.bend(r, -5.0);
+        assert_eq!(doc.relation(r).unwrap().elbow, Some(48), "3 - 5 more percentage points from half way");
         let pts = doc.route(doc.relation(r).unwrap()).unwrap();
-        assert_eq!(pts[1].0, 26.0, "3 - 5 more from half way");
+        assert!((pts[1].0 - (p1.0 + span * 0.48)).abs() < 1e-9, "48% of the way along the leg: {pts:?}");
 
         let mut vert = Document::default();
         let c = vert.add(Box, "", 0.0, 0.0);
@@ -2151,6 +2317,32 @@ mod tests {
         assert_eq!(straight.bendable(&rel3), None);
         straight.bend(r3, 3.0);
         assert_eq!(straight.relation(r3).unwrap().elbow, None, "nothing to bend, so nothing changed");
+    }
+
+    #[test]
+    fn an_automatic_orthogonal_route_bends_around_a_third_shape_in_its_way_but_a_hand_set_elbow_is_never_second_guessed() {
+        let mut doc = Document::default();
+        let a = doc.add(Box, "", 0.0, 0.0);
+        let b = doc.add(Box, "", 40.0, 20.0);
+        let r = doc.connect(RelationKind::Link, a, b).unwrap();
+        let before = doc.route(doc.relation(r).unwrap()).unwrap();
+
+        // An obstacle placed right where the plain, un-bent route already runs.
+        let c = doc.add(Box, "", 25.0, 10.0);
+        doc.element_mut(c).unwrap().w = 10.0;
+        doc.element_mut(c).unwrap().h = 5.0;
+        let c_rect = (25.0, 10.0, 10.0, 5.0);
+        assert!(crate::shapes::route_crosses(&before, c_rect), "the obstacle really is in the plain route's own way: {before:?}");
+
+        let after = doc.route(doc.relation(r).unwrap()).unwrap();
+        assert!(!crate::shapes::route_crosses(&after, c_rect), "the automatic route now bends around it instead: {after:?}");
+        assert_eq!((after[0], after[after.len() - 1]), (before[0], before[before.len() - 1]), "the two ends it actually joins never move");
+
+        // Once bent by hand — even back to nothing — an elbow is the person's to keep, so
+        // an obstacle is never allowed to second-guess it.
+        doc.bend(r, 0.0);
+        let held = doc.route(doc.relation(r).unwrap()).unwrap();
+        assert!(crate::shapes::route_crosses(&held, c_rect), "a hand-set elbow is drawn where it was put, obstacle or not: {held:?}");
     }
 
     #[test]

@@ -77,7 +77,7 @@ pub static COMMANDS: &[ExCmd] = &[
     ExCmd { name: "write", aliases: &["w"], op: Op::Write, arg: Arg::Path, what: "save — to the file opened, or to the path given" },
     ExCmd { name: "wq", aliases: &["x"], op: Op::Wq, arg: Arg::Path, what: "save and quit" },
     ExCmd { name: "open", aliases: &["o", "e", "edit"], op: Op::Open, arg: Arg::Path, what: "open a diagram file" },
-    ExCmd { name: "import", aliases: &[], op: Op::Import, arg: Arg::Path, what: "import a draw.io file, an ArchiMate exchange file, a coArchi model folder, or a Foundry ontology export — best-effort, never refused for an unrecognized shape; empty, opens a browser" },
+    ExCmd { name: "import", aliases: &[], op: Op::Import, arg: Arg::Path, what: "import a draw.io file, an ArchiMate exchange file, a coArchi model folder, or a Foundry ontology export — best-effort, never refused for an unrecognized shape; empty, opens a browser. A Foundry export needs an open workbench: it registers straight into its elements and flags any conflict" },
     ExCmd { name: "new", aliases: &["n"], op: Op::New, arg: Arg::None, what: "start an empty diagram" },
     ExCmd { name: "quit", aliases: &["q"], op: Op::Quit, arg: Arg::None, what: "quit — asks if there is unsaved work; :q! does not" },
     ExCmd { name: "add", aliases: &["a"], op: Op::Add, arg: Arg::Kind, what: "add an element — bare opens the palette, :add <kind> skips it" },

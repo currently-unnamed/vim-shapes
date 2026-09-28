@@ -477,12 +477,13 @@ impl Edge {
 }
 
 /// One object type, interface or action type this export defines, read back out for a
-/// conflict check — see `Index::defined`.
+/// conflict check and for `registry::Registry::absorb` — see `Index::defined`.
 pub struct Defined {
     pub kind: ShapeKind,
     pub api_name: String,
     pub display_name: String,
     pub properties: Vec<Property>,
+    pub status: Status,
 }
 
 /// The whole export, parsed once and kept — never drawn in full. `:tree` walks its resources
@@ -607,17 +608,18 @@ impl Index {
     }
 
     /// Every object type, interface and action type this export defines — kind, api_name,
-    /// display name, and its properties already converted to this app's own `Property` — so
-    /// a workbench's registry can check for a conflict against what it already knows without
-    /// this module's own `Raw*` types ever leaving it.
+    /// display name, status, and its properties already converted to this app's own
+    /// `Property` — so a workbench's registry can check for a conflict, or absorb a brand new
+    /// one, against what it already knows without this module's own `Raw*` types ever leaving
+    /// it.
     pub fn defined(&self) -> Vec<Defined> {
         let mut out: Vec<Defined> = self
             .object_types
             .values()
-            .map(|o| Defined { kind: ShapeKind::ObjectType, api_name: o.api_name.clone(), display_name: o.display_name.clone(), properties: properties_from(&o.properties, &o.primary_keys, &o.title) })
+            .map(|o| Defined { kind: ShapeKind::ObjectType, api_name: o.api_name.clone(), display_name: o.display_name.clone(), properties: properties_from(&o.properties, &o.primary_keys, &o.title), status: o.status })
             .collect();
-        out.extend(self.interfaces.values().map(|i| Defined { kind: ShapeKind::Interface, api_name: i.api_name.clone(), display_name: i.display_name.clone(), properties: properties_from(&i.properties, &[], &None) }));
-        out.extend(self.actions.values().map(|a| Defined { kind: ShapeKind::ActionType, api_name: a.api_name.clone(), display_name: a.display_name.clone(), properties: properties_from_parameters(&a.parameters) }));
+        out.extend(self.interfaces.values().map(|i| Defined { kind: ShapeKind::Interface, api_name: i.api_name.clone(), display_name: i.display_name.clone(), properties: properties_from(&i.properties, &[], &None), status: i.status }));
+        out.extend(self.actions.values().map(|a| Defined { kind: ShapeKind::ActionType, api_name: a.api_name.clone(), display_name: a.display_name.clone(), properties: properties_from_parameters(&a.parameters), status: a.status }));
         out
     }
 
